@@ -14,40 +14,40 @@ Relevant to published work:
 
 ---
 
-## `rehab_analytics` Subfolder
+### `rehab_analytics` Subfolder
 
-### `01_EDA.Rmd`
+#### `01_EDA.Rmd`
 - R Markdown notebook for exploratory data analysis (EDA) of COVID-19 rehabilitation data in NHS Lothian, including data loading, summary statistics, and visualization.
 
-### `02_COVID_pts_extraction.Rmd`
+#### `02_COVID_pts_extraction.Rmd`
 - R Markdown notebook for extracting the COVID-19 patient cohort from raw data sources, including data cleaning and preparation steps.
 
-### `03_COVID_propensity_matching.Rmd`
+#### `03_COVID_propensity_matching.Rmd`
 - R Markdown notebook for performing propensity score matching to balance covariates between COVID-19 patient groups.
 
-### `04_COVID_groups_exploration.Rmd`
+#### `04_COVID_groups_exploration.Rmd`
 - R Markdown notebook for exploring matched patient groups, including group-wise comparisons and descriptive statistics.
 
-### `05_COVID_pts_survival_analysis.Rmd`
+#### `05_COVID_pts_survival_analysis.Rmd`
 - R Markdown notebook for survival analysis among COVID-19 hospitalised patients.
 
-### `06_COVID_regression_analysis.Rmd`
+#### `06_COVID_regression_analysis.Rmd`
 - R Markdown notebook for regression analysis of rehabilitation outcomes, including multivariate modeling and mixed-effects estimation.
 
 ---
 
-## `synthetic_pathways` Subfolder
+### `synthetic_pathways` Subfolder
 
-### `dateUtils.R`
+#### `dateUtils.R`
 - R script providing utility functions for generating and manipulating synthetic date data for simulated patient pathways.
 
-### `generateData.R`
+#### `generateData.R`
 - R script for generating dummy data to support COVID-19 rehabilitation analysis, including basic synthetic episodes, lab tests, and care pathways.
 
-### `generateEvalCohort.R`
+#### `generateEvalCohort.R`
 - R script for generating evaluation cohorts from synthetic datasets, including cohort selection and adjustment procedures.
 
-### `processMapping.R`
+#### `processMapping.R`
 - R script for processing and summarising metadata for process mapping in bupaR.
 
 ---
