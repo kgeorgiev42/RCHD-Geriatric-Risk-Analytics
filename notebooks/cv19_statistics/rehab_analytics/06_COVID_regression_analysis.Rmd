@@ -1,0 +1,273 @@
+---
+title: "06_Regression_Analysis"
+author: "Konstantin Georgiev"
+date: "2022-11-22"
+output: html_document
+---
+#### Libraries and working directory
+```{r}
+library(tidyverse)
+library(knitr)
+library(lubridate)
+library(dplyr)
+library(finalfit)
+library(broom)
+library(readr)
+library(forestplot)
+library(kableExtra)
+library(MASS)
+library(foreign)
+library(lmerTest)
+library(lme4)
+library(see)
+library(performance)
+library(moderndive)
+library(ROSE)
+library(randomForest)
+library(e1071)
+library(mltools)
+library(data.table)
+library(MuMIn)
+library(car)
+
+knitr::opts_chunk$set(echo=TRUE)
+knitr::opts_knit$set(root.dir = "//<study_data_folder>")
+sessionInfo()
+```
+
+#### Load data
+```{r}
+covid_pts <- read.csv("//<study_folder>/<cohort_file_with_contacts>.csv")
+```
+
+#### Split age groups
+```{r}
+hist(covid_pts$ageAtFirstTest)
+hist(covid_pts$simd2020Quintile)
+hist(covid_pts$total_mins_rehab)
+hist(covid_pts$total_count_rehab)
+hist(covid_pts$n_physio)
+hist(covid_pts$time_to_therapy)
+hist(covid_pts$time_to_therapy_2)
+hist(covid_pts$total_count_ooh_rehab)
+```
+
+
+#### Setup categories
+```{r}
+covid_pts <- covid_pts %>%
+  mutate(age_group = case_when(
+    ageAtFirstTest >= 18 & ageAtFirstTest < 29 ~ "18-29",
+    ageAtFirstTest >= 30 & ageAtFirstTest < 50 ~ "30-49",
+    ageAtFirstTest >= 50 & ageAtFirstTest < 66 ~ "50-65",
+    ageAtFirstTest >= 66 & ageAtFirstTest < 80 ~ "66-79",
+    ageAtFirstTest >= 80 ~ "Above 79",
+  ),
+age_group = factor(age_group, level=c("18-29", "30-49", "50-65", "66-79", "Above 79"))) %>%
+  mutate(simd2020Quintile = factor(simd2020Quintile, level=c('1','2','3','4','5'))) %>%
+  mutate(sex_b = as.numeric(case_when(sex == 'M' ~ 0, sex == 'F' ~ 1))) %>%
+  mutate(ageAtFirstTest = as.numeric(ageAtFirstTest))
+```
+```{r}
+table(covid_pts$age_group)
+```
+
+
+#### Generate binary flag for high rehabilitation
+```{r}
+quantile(covid_pts$total_mins_rehab, probs=seq(0,1,1/4))
+plot(density(covid_pts$total_mins_rehab))
+```
+```{r}
+covid_pts <- covid_pts %>%
+  mutate(high_rehab_75p = ifelse(total_mins_rehab >= <75p_value>, 1, 0))
+
+table(covid_pts$high_rehab_75p)
+prop.table(table(covid_pts$high_rehab_75p))
+```
+```{r}
+covariates <- c('age_group', 'sex_b', 'simd2020Quintile', 'cm_chd', 'cm_stroke_any', 'cm_mi', 'cm_diabetes', 'cm_obesity', 'cm_dementia', 'cm_delirium', 'cm_depression', 'cm_asthma', 'cm_copd', 'testPositive_10d_b')
+
+cov_set <- covid_pts[,c(covariates)]
+
+cov_set$total_mins_rehab <- covid_pts$total_mins_rehab
+cov_set$high_rehab_75p <- covid_pts$high_rehab_75p
+```
+```{r}
+table(cov_set$testPositive_10d_b)
+```
+
+
+
+#### Balance for COVID-19 status
+```{r}
+table(covid_pts$testPositive_10d)
+prop.table(table(covid_pts$testPositive_10d))
+```
+```{r}
+cov_over <- ovun.sample(testPositive_10d_b~.,data=cov_set, method='over', seed=42, N=<n_rows>)$data
+table(cov_over$testPositive_10d_b)
+prop.table(table(cov_over$testPositive_10d_b))
+```
+```{r}
+cov_over$INDEX <- 1:nrow(cov_over)
+```
+
+
+#### Fit balanced/unbalanced regression models
+```{r}
+### Fit basic glm model
+reg_model <- lm(log(total_mins_rehab) ~ age_group + sex_b + simd2020Quintile + cm_chd + cm_stroke_any + cm_mi + cm_diabetes + cm_obesity + cm_dementia + cm_delirium + cm_depression + cm_asthma + cm_copd + testPositive_10d_b, data=cov_set)
+
+reg_model_over <- lm(log(total_mins_rehab) ~ age_group + sex_b + simd2020Quintile + cm_chd + cm_stroke_any + cm_mi + cm_diabetes + cm_obesity + cm_dementia + cm_delirium + cm_depression + cm_asthma + cm_copd + testPositive_10d_b, data=cov_over)
+```
+#### Detect outliers
+```{r}
+cutoff <- 4 / ((nrow(cov_over)-length(reg_model_over$coefficients) - 2))
+par(mfrow=c(1,2))
+qqPlot(reg_model_over, main="QQ Plot")
+plot(reg_model_over, which=4, cook.levels=cutoff); par(mfrow=c(1,1))
+```
+```{r}
+### Annottate data points to remove
+infl <- influence.measures(reg_model_over)
+cov_over <- data.frame(cov_over, infl[[1]], infl[[2]])
+remove <- apply(infl$is.inf, 1, function(x) {
+  ifelse(x==TRUE, return('remove'), return('keep'))
+})
+cov_over <- data.frame(cov_over, remove)
+nrow(cov_over)
+```
+```{r}
+#### Remove outliers
+cov_over_out <- cov_over[cov_over$remove=='keep',]
+nrow(cov_over_out)
+```
+```{r}
+reg_model_over_out <- lm(log(total_mins_rehab) ~ age_group + sex_b + simd2020Quintile + cm_chd + cm_stroke_any + cm_mi + cm_diabetes + cm_obesity + cm_dementia + cm_delirium + cm_depression + cm_asthma + cm_copd + testPositive_10d_b, data=cov_over_out)
+```
+
+#### Perform stepwise regression to filter the relevant features
+```{r}
+cov_over_out_s <- stepAIC(reg_model_over_out, direction='both', trace=FALSE)
+cov_over_out_b <- stepAIC(reg_model_over_out, direction='backward', trace=FALSE)
+cov_over_out_f <- stepAIC(reg_model_over_out, direction='forward', trace=FALSE)
+summary(cov_over_out_s)
+summary(cov_over_out_b)
+summary(cov_over_out_f)
+```
+
+#### Fit regression models
+```{r}
+### Fit basic glm model
+reg_model_step <- lm(log(total_mins_rehab) ~ age_group + sex_b + simd2020Quintile + cm_chd + cm_mi + cm_diabetes + cm_obesity + cm_dementia + cm_delirium + cm_depression + cm_asthma + testPositive_10d_b, data=cov_over_out)
+
+reg_model_step_me <- lmer(log(total_mins_rehab) ~ age_group + sex_b + simd2020Quintile + cm_chd + cm_mi + cm_diabetes + cm_obesity + cm_dementia + cm_delirium + cm_depression + cm_asthma + testPositive_10d_b + (1 + age_group | simd2020Quintile), data=cov_over_out, REML=T, lmerControl(optimizer='Nelder_Mead'))
+```
+
+```{r}
+r.squaredGLMM(reg_model)
+r.squaredGLMM(reg_model_over)
+r.squaredGLMM(reg_model_over_out)
+r.squaredGLMM(reg_model_step)
+r.squaredGLMM(reg_model_step_me)
+
+AIC(logLik(reg_model))
+AIC(logLik(reg_model_over))
+AIC(logLik(reg_model_over_out))
+AIC(logLik(reg_model_step))
+AIC(logLik(reg_model_step_me))
+
+BIC(logLik(reg_model))
+BIC(logLik(reg_model_over))
+BIC(logLik(reg_model_over_out))
+BIC(logLik(reg_model_step))
+BIC(logLik(reg_model_step_me))
+
+compare_performance(reg_model, reg_model_over, reg_model_over_out, reg_model_step, reg_model_step_me)
+```
+```{r}
+sjPlot::tab_model(reg_model_step_me)
+```
+
+```{r}
+check_singularity(reg_model_step_me)
+check_heteroscedasticity(reg_model_step_me)
+#check_overdispersion(reg_model_step_me)
+#check_zeroinflation(reg_model_step_me)
+```
+```{r}
+pdf('test.pdf', 8, 8)
+check_model(reg_model_step_me)
+dev.off()
+```
+
+
+#### Group by outcome and stratify model
+
+```{r}
+summary(reg_model_step_me)
+```
+```{r}
+sjPlot::tab_model(reg_model_step_me, file="//<study_folder>/<reg_analysis_table>.html")
+```
+
+
+```{r}
+sjPlot::plot_model(reg_model_step_me,
+                   grid=FALSE,
+                   type='est',
+                   ci.lvl=.95,
+                   title="Linear regression coefficients relative to minutes of rehabilitation",
+                   axis.title = 'Coefficient estimate (95% CI)',
+                   axis.labels=rev(c('Age group (30-49)', 'Age group (50-65)',
+                                 'Age group (66-79)', 'Age group (Above 79)',
+                                 'Sex (Female)', 'SIMD (Quintile 2)', 'SIMD (Quintile 3)',
+                                 'SIMD (Quintile 4)', 'SIMD (Quintile 5 - Least deprived)',
+                                 'Coronary Heart Disease', 'Myocardial Infarction', 'Diabetes',
+                                 'Obesity', 'Dementia', 'Delirium (not alcohol-induced)',
+                                 'Depression', 'Asthma', 'COVID-19 status (Positive)'))) + theme_bw(base_size=9) + theme(plot.title=element_text(face='bold'), text=element_text(size=9, family='sans'), legend.position=c(0.73,0.01), legend.justification=c(0,0), legend.background=element_rect(colour='grey80'),legend.title.align=.5,
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+ggsave("//<study_folder>/<reg_correlation_plot>.html", height=5.2,
+       units='in', bg='white')
+```
+
+
+
+```{r}
+reg_by_cov <- cov_over_out %>%
+  do(broom::tidy(reg_model_step_me)) %>%
+  rename(model=testPositive_10d_b) %>%
+  mutate(p_value_adj = round(p.value, digits=5))
+
+reg_by_cov
+```
+```{r}
+summary(reg_by_cov)
+```
+
+
+```{r}
+reg_plot <- dwplot(reg_by_cov,
+       vline=geom_vline(
+         xintercept=0,
+         colour='grey60',
+         linetype=2)) +
+  theme_bw(base_size=9)+
+  xlab('Coefficient estimate (95% CI)')+
+  ylab("")+
+  ggtitle("Linear regression coefficients relative to minutes of rehabilitation")+
+  theme(plot.title=element_text(face='bold'), text=element_text(size=10, family='sans'), legend.position=c(0.73,0.01), legend.justification=c(0,0), legend.background=element_rect(colour='grey80'),legend.title.align=.5,
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  scale_colour_grey(start=.3, end=.7, name='Population', breaks=c('Negative','Positive'), labels=c('COVID-19 Negative','COVID-19 Positive')) + scale_x_continuous(breaks=seq(-500, 500, by=100))
+
+reg_plot
+ggsave("//<study_folder>/<reg_adjusted_correlation_plot>.pdf", height=5.2,
+       units='in', bg='white')
+```
+```{r}
+anova(reg_model_over, reg_model_over_me, test='chisq', refit=F)
+```
+
+

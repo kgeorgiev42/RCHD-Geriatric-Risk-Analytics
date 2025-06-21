@@ -1,0 +1,691 @@
+---
+title: "COVID-19 rehab matched set exploration"
+output: html_notebook
+---
+
+#### Libraries and working directory
+
+```{r}
+library(tidyverse)
+library(knitr)
+library(lubridate)
+library(grid)
+library(gtsummary)
+library(gt)
+library(patchwork)
+library(ggplot2)
+library(ggpubr)
+library(gdata)
+library(gridExtra)
+library(ggstatsplot)
+library(survey)
+library(plyr)
+library(scales)
+library(beeswarm)
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE)
+knitr::opts_knit$set(root.dir = "//<study_data_folder>")
+```
+```{r}
+sessionInfo()
+```
+#### Load data
+```{r}
+covid_pts <- read.csv("../<study_folder>/<cohort_file>.csv")
+head(covid_pts)
+dim(covid_pts)
+length(unique(covid_pts$pid))
+```
+```{r}
+covid_pts_pos <- covid_pts[covid_pts$testPositive_10d=='Positive',]
+covid_pts_neg <- covid_pts[covid_pts$testPositive_10d=='Negative',]
+
+sum(covid_pts_pos$n_physio)
+wilcox.test(covid_pts_pos$n_physio, covid_pts_neg$n_physio)
+wilcox.test(covid_pts_pos$n_diet, covid_pts_neg$n_diet)
+```
+
+
+#### Table preprocessing
+```{r}
+covid_pts <- covid_pts %>%
+  mutate(cm_chd=ifelse(cm_chd==0, 'N', 'Y')) %>%
+  mutate(cm_stroke_any=ifelse(cm_stroke_any==0, 'N', 'Y')) %>%
+  mutate(cm_mi=ifelse(cm_mi==0, 'N', 'Y')) %>%
+  mutate(cm_diabetes=ifelse(cm_diabetes==0, 'N', 'Y')) %>%
+  mutate(cm_obesity=ifelse(cm_obesity==0, 'N', 'Y')) %>%
+  mutate(cm_hip_fracture=ifelse(cm_hip_fracture==0, 'N', 'Y')) %>%
+  mutate(cm_dementia=ifelse(cm_dementia==0, 'N', 'Y')) %>%
+  mutate(cm_delirium=ifelse(cm_delirium==0, 'N', 'Y')) %>%
+  mutate(cm_depression=ifelse(cm_depression==0, 'N', 'Y')) %>%
+  mutate(cm_asthma=ifelse(cm_asthma==0, 'N', 'Y')) %>%
+  mutate(cm_copd=ifelse(cm_copd==0, 'N', 'Y')) %>%
+  mutate(rehab_pt = ifelse(is.na(rehab_pt), 'N', rehab_pt)) %>%
+  mutate(rehab_ot = ifelse(is.na(rehab_ot), 'N', rehab_ot)) %>%
+  mutate(rehab_slt = ifelse(is.na(rehab_slt), 'N', rehab_slt)) %>%
+  mutate(rehab_diet = ifelse(is.na(rehab_diet), 'N', rehab_diet)) %>%
+  mutate(n_physio = str_count(rehab_interventions, 'Physiotherapy')) %>%
+  mutate(n_occt = str_count(rehab_interventions, 'Occupational Therapy')) %>%
+  mutate(n_slt = str_count(rehab_interventions, 'Speech and Language Therapy')) %>%
+  mutate(n_diet = str_count(rehab_interventions, 'Dietetics')) %>%
+  mutate(n_physio = ifelse(is.na(n_physio), 0, n_physio)) %>%
+  mutate(n_occt = ifelse(is.na(n_occt), 0, n_occt)) %>%
+  mutate(n_slt = ifelse(is.na(n_slt), 0, n_slt)) %>%
+  mutate(n_diet = ifelse(is.na(n_diet), 0, n_diet))
+```
+
+#### Unmatched patient characteristics
+```{r}
+### Fix speciality and rehab outcome flags
+covid_pts <- covid_pts %>%
+  mutate(spec_general_medicine=ifelse(DischargeSpecialtyCode %in% c('GM', 'GMWNT'), 1, 0)) %>%
+  mutate(spec_respiratory_medicine=ifelse(DischargeSpecialtyCode %in% c('RESP', 'RESPCSNT', 'RESPFGEBNT', 'RESPPXARNT', 'RESPWANT'), 1, 0)) %>%
+  mutate(spec_geriatric_medicine=ifelse(DischargeSpecialtyCode %in% c('GA', 'GORU', 'RESPITE'), 1, 0)) %>%
+  mutate(spec_respiratory_medicine=ifelse(spec_respiratory_medicine==0, 'N', 'Y')) %>%
+  mutate(spec_geriatric_medicine=ifelse(spec_geriatric_medicine==0, 'N', 'Y')) %>%
+  mutate(spec_general_medicine=ifelse(spec_general_medicine==0, 'N', 'Y')) %>%
+  mutate(specialty=case_when(spec_general_medicine=='Y' ~ 'General Medicine', spec_geriatric_medicine=='Y' ~ 
+                               'Geriatric Medicine', spec_respiratory_medicine=='Y' ~ 'Respiratory Medicine',
+                             TRUE ~ 'Other')) %>%
+  mutate(specialty=factor(specialty, levels=c('General Medicine', 'Respiratory Medicine', 'Geriatric Medicine',
+                                                 'Other')))
+```
+
+### Add minute of rehab per day of hospital stay
+```{r}
+covid_pts <- covid_pts %>%
+  rowwise() %>%
+  mutate(rehab_to_los = round(total_mins_rehab / round(index_LOS, 0), 2)) %>%
+  mutate(rehab_to_los = ifelse(is.na(rehab_to_los), 0, rehab_to_los)) %>%
+  mutate(rehab_to_los = ifelse(is.infinite(rehab_to_los), total_mins_rehab, rehab_to_los))
+```
+```{r}
+hist(covid_pts$rehab_to_los)
+```
+
+```{r}
+#### Build characteristics table with all data
+covid_pts_unmatched_tbl <- covid_pts %>%
+  select(c(ageAtFirstTest, sex, simd2020Quintile, cm_chd, cm_stroke_any, cm_mi, cm_diabetes, cm_obesity, cm_dementia, cm_delirium, cm_depression, cm_asthma, cm_copd, index_LOS, mortality_1yr, specialty)) %>%
+  tbl_summary(
+  statistic = list(ageAtFirstTest~"{median} ({p25}, {p75})", index_LOS~"{median} ({p25}, {p75})"),
+  digits = all_continuous()~2,
+  missing="no",
+  value=list(cm_chd~'Y', cm_stroke_any~'Y', cm_mi~'Y', cm_diabetes~'Y', cm_obesity~'Y', mortality_1yr~'Y', cm_dementia~'Y', cm_delirium~'Y', cm_depression~'Y', cm_asthma~'Y', cm_copd~'Y'),
+  label=list(ageAtFirstTest~'Age at first test', sex ~ 'Sex', index_LOS ~ 'Length of stay (days)', cm_chd ~ 'Coronary Heart Disease', simd2020Quintile ~ 'SIMD (Quintiles)', cm_stroke_any ~ 'Stroke', cm_mi ~ 'Myocardial infarction', cm_diabetes ~ 'Diabetes', cm_obesity ~ 'Obesity', cm_dementia ~ 'Dementia', cm_delirium ~ 'Delirium (not induced by alcohol)', cm_depression ~ 'Depression', cm_asthma ~ 'Asthma', 
+             cm_copd ~ 'COPD', mortality_1yr ~ 'Died (1-year after index admission)', specialty ~ 'Discharge specialty')
+) %>%
+  bold_labels()
+
+covid_pts_unmatched_tbl %>% as_gt() %>% gtsave("../<study_results>/<unmatched_table>.html")
+```
+
+
+```{r}
+#### Build characteristics table with covariate values
+covid_pts_unmatched_tbl <- covid_pts %>%
+  select(c(ageAtFirstTest, sex, simd2020Quintile, cm_chd, cm_stroke_any, cm_mi, cm_diabetes, cm_obesity, cm_dementia, cm_delirium, cm_depression, cm_asthma, cm_copd, index_LOS, testPositive_10d, mortality_1yr, specialty)) %>%
+  tbl_summary(
+  by=testPositive_10d,
+  statistic = list(ageAtFirstTest~"{median} ({p25}, {p75})", index_LOS~"{median} ({p25}, {p75})"),
+  digits = all_continuous()~2,
+  missing="no",
+  value=list(cm_chd~'Y', cm_stroke_any~'Y', cm_mi~'Y', cm_diabetes~'Y', cm_obesity~'Y', mortality_1yr~'Y', cm_dementia~'Y', cm_delirium~'Y', cm_depression~'Y', cm_asthma~'Y', cm_copd~'Y'),
+  label=list(ageAtFirstTest~'Age at first test', sex ~ 'Sex', index_LOS ~ 'Length of stay (days)', cm_chd ~ 'Coronary Heart Disease', simd2020Quintile ~ 'SIMD (Quintiles)', cm_stroke_any ~ 'Stroke', cm_mi ~ 'Myocardial infarction', cm_diabetes ~ 'Diabetes', cm_obesity ~ 'Obesity', cm_dementia ~ 'Dementia', cm_delirium ~ 'Delirium (not induced by alcohol)', cm_depression ~ 'Depression', cm_asthma ~ 'Asthma', 
+             cm_copd ~ 'COPD', mortality_1yr ~ 'Died (1-year after index admission)', specialty ~ 'Discharge specialty')
+) %>%
+  add_p(pvalue_fun= ~style_pvalue(.x, digits=3)) %>%
+  bold_labels() %>%
+  modify_spanning_header(c('stat_1', 'stat_2')~"**COVID-19 Patient Characteristics (Unmatched)**")
+
+covid_pts_diff <- covid_pts %>%
+  select(c(ageAtFirstTest, sex, simd2020Quintile, cm_chd, cm_stroke_any, cm_mi, cm_diabetes, cm_obesity, cm_dementia, cm_delirium, cm_depression, cm_asthma, cm_copd, index_LOS, testPositive_10d, mortality_1yr, specialty)) %>%
+  tbl_summary(
+  by=testPositive_10d,
+  statistic = list(ageAtFirstTest~"{median} ({p25}, {p75})", index_LOS~"{median} ({p25}, {p75})"),
+  digits = all_continuous()~2,
+  missing="no",
+  value=list(cm_chd~'Y', cm_stroke_any~'Y', cm_mi~'Y', cm_diabetes~'Y', cm_obesity~'Y', mortality_1yr~'Y', cm_dementia~'Y', cm_delirium~'Y', cm_depression~'Y', cm_asthma~'Y', cm_copd~'Y'),
+  label=list(ageAtFirstTest~'Age at first test', sex ~ 'Sex', index_LOS ~ 'Length of stay (days)', cm_chd ~ 'Coronary Heart Disease', simd2020Quintile ~ 'SIMD (Quintiles)', cm_stroke_any ~ 'Stroke', cm_mi ~ 'Myocardial infarction', cm_diabetes ~ 'Diabetes', cm_obesity ~ 'Obesity', cm_dementia ~ 'Dementia', cm_delirium ~ 'Delirium (not induced by alcohol)', cm_depression ~ 'Depression', cm_asthma ~ 'Asthma', 
+             cm_copd ~ 'COPD', mortality_1yr ~ 'Died (1-year after index admission)', specialty ~ 'Discharge specialty')
+) %>%
+  add_difference(everything()~'smd') %>%
+  bold_labels() %>%
+  modify_spanning_header(c('stat_1', 'stat_2')~"**COVID-19 Patient Characteristics (Unmatched)**") %>%
+  modify_column_hide(all_stat_cols())
+
+covid_pts_fin <- tbl_merge(list(covid_pts_unmatched_tbl, covid_pts_diff)) %>%
+  modify_spanning_header(everything() ~ NA)
+covid_pts_fin
+
+covid_pts_fin %>% as_gt() %>% gtsave("../<study_results>/<unmatched_table_with_covariates>.html")
+```
+
+```{r}
+table(covid_pts[covid_pts$testPositive_10d=='Positive',]$type)
+table(covid_pts[covid_pts$testPositive_10d=='Negative',]$type)
+```
+
+#### Received rehab characteristics (unmatched)
+
+```{r}
+#### Build characteristics table with rehab outcomes (all data)
+covid_pts_unmatched_tbl <- covid_pts %>%
+  select(c(total_mins_rehab, total_count_rehab, n_physio, n_occt, n_slt, n_diet, 
+           time_to_therapy, time_to_therapy_2, total_sum_ooh_rehab, rehab_to_los)) %>%
+  tbl_summary(
+  statistic = list(all_continuous()~"{mean} ({sd})"),
+  missing="no",
+  digits = all_continuous()~2,
+  label=list(time_to_therapy~'Time to first contact (days)', 
+             time_to_therapy_2~'Time to second consecutive contact (days)',
+             total_mins_rehab~'Total minutes of rehab', 
+             total_count_rehab~'Number of interventions',
+             total_sum_ooh_rehab~'Total minutes of rehab (out-of-hours)',
+             n_physio~'Physiotherapy (number of contacts)', 
+             n_occt~'Occupational Therapy (number of contacts)', n_slt~'Speech and Language Therapy (number of contacts)', n_diet~'Dietetics (number of contacts)', rehab_to_los~'Minutes of rehab per day of hospitalisation')
+) %>%
+  bold_labels()
+
+covid_pts_unmatched_tbl %>% as_gt() %>% gtsave("../<study_results>/<outcomes_table>.html")
+```
+
+```{r}
+#### Build characteristics table with rehab outcomes
+covid_pts_unmatched_tbl <- covid_pts %>%
+  select(c(total_mins_rehab, total_count_rehab, n_physio, n_occt, n_slt, n_diet, 
+           time_to_therapy, time_to_therapy_2, total_sum_ooh_rehab, rehab_to_los, testPositive_10d)) %>%
+  tbl_summary(
+  by=testPositive_10d,
+  statistic = list(all_continuous()~"{median} ({p25}, {p75})"),
+  missing="no",
+  digits = all_continuous()~2,
+  label=list(time_to_therapy~'Time to first contact (days)', 
+             time_to_therapy_2~'Time to second consecutive contact (days)',
+             total_mins_rehab~'Total minutes of rehab', 
+             total_count_rehab~'Number of interventions',
+             total_sum_ooh_rehab~'Total minutes of rehab (out-of-hours)',
+             n_physio~'Physiotherapy (number of contacts)', 
+             n_occt~'Occupational Therapy (number of contacts)', n_slt~'Speech and Language Therapy (number of contacts)', n_diet~'Dietetics (number of contacts)', rehab_to_los~'Minutes of rehab per day of hospitalisation')
+) %>%
+  add_p(pvalue_fun= ~style_pvalue(.x, digits=3)) %>%
+  bold_labels() %>%
+  modify_spanning_header(c('stat_1', 'stat_2')~"**COVID-19 Patient Characteristics (Unmatched)**") %>%
+  modify_header(label="**Rehab characteristic**")
+
+covid_pts_diff <- covid_pts %>%
+  select(c(total_mins_rehab, total_count_rehab, n_physio, n_occt, n_slt, n_diet, 
+           time_to_therapy, time_to_therapy_2, total_sum_ooh_rehab, rehab_to_los, testPositive_10d)) %>%
+  tbl_summary(
+  by=testPositive_10d,
+  statistic = list(all_continuous()~"{median} ({p25}, {p75})"),
+  missing="no",
+  digits = all_continuous()~2,
+  label=list(time_to_therapy~'Time to first contact (days)', 
+             time_to_therapy_2~'Time to second consecutive contact (days)',
+             total_mins_rehab~'Total minutes of rehab', 
+             total_count_rehab~'Number of interventions',
+             total_sum_ooh_rehab~'Total minutes of rehab (out-of-hours)',
+             n_physio~'Physiotherapy (number of contacts)', 
+             n_occt~'Occupational Therapy (number of contacts)', n_slt~'Speech and Language Therapy (number of contacts)', n_diet~'Dietetics (number of contacts)', rehab_to_los~'Minutes of rehab per day of hospitalisation')
+) %>%
+  bold_labels() %>%
+  modify_spanning_header(c('stat_1', 'stat_2')~"**COVID-19 Patient Characteristics (Unmatched)**") %>%
+  modify_header(label="**Rehab characteristic**") %>%
+  add_difference(everything()~'smd') %>%
+  modify_column_hide(all_stat_cols())
+
+covid_pts_fin <- tbl_merge(list(covid_pts_unmatched_tbl, covid_pts_diff)) %>%
+  modify_spanning_header(everything() ~ NA)
+covid_pts_fin
+
+covid_pts_fin %>% as_gt() %>% gtsave("../<study_results>/<outcomes_table_2plus_contacts>.html")
+```
+
+
+#### Create matched patient characteristics table
+
+```{r}
+cov_weighted <- svydesign(ids=~1, data=covid_pts, weights=~ipw_weight) %>%
+  tbl_svysummary(
+  by=testPositive_10d,
+  include=c('ageAtFirstTest', 'sex', 'simd2020Quintile', 'cm_chd', 'cm_stroke_any', 'cm_mi', 'cm_diabetes', 'cm_obesity', 'cm_dementia', 'cm_delirium', 'cm_depression', 'cm_asthma', 'cm_copd', 'index_LOS', 'mortality_1yr'),
+  statistic = list(ageAtFirstTest~"{median} ({p25}, {p75})", index_LOS~"{median} ({p25}, {p75})"),
+  digits = all_continuous()~2,
+  missing="no",
+  value=list(cm_chd~'Y', cm_stroke_any~'Y', cm_mi~'Y', cm_diabetes~'Y', cm_obesity~'Y', mortality_1yr~'Y',cm_dementia~'Y', cm_delirium~'Y', cm_depression~'Y', cm_asthma~'Y', cm_copd~'Y'),
+  label=list(ageAtFirstTest~'Age at first test', sex ~ 'Sex', simd2020Quintile ~ 'SIMD (Quintiles)', index_LOS ~ 'Length of stay (days)', cm_chd ~ 'Coronary Heart Disease', cm_stroke_any ~ 'Stroke', cm_mi ~ 'Myocardial infarction', cm_diabetes ~ 'Diabetes', cm_obesity ~ 'Obesity', cm_dementia ~ 'Dementia', cm_delirium ~ 'Delirium (not induced by alcohol)', cm_depression ~ 'Depression', cm_asthma ~ 'Asthma', 
+             cm_copd ~ 'COPD', mortality_1yr ~ 'Died (1-year after index admission)')
+) %>%
+  add_p(pvalue_fun= ~style_pvalue(.x, digits=3)) %>%
+  bold_labels() %>%
+  modify_spanning_header(c('stat_1', 'stat_2')~"**COVID-19 Patient Characteristics (matched)**") %>%
+  modify_header(label="**Matching covariate**")
+
+cov_diff <- svydesign(ids=~1, data=covid_pts, weights=~ipw_weight) %>%
+  tbl_svysummary(
+  by=testPositive_10d,
+  include=c('ageAtFirstTest', 'sex', 'simd2020Quintile', 'cm_chd', 'cm_stroke_any', 'cm_mi', 'cm_diabetes', 'cm_obesity', 'cm_dementia', 'cm_delirium', 'cm_depression', 'cm_asthma', 'cm_copd', 'index_LOS', 'mortality_1yr'),
+  statistic = list(ageAtFirstTest~"{median} ({p25}, {p75})", index_LOS~"{median} ({p25}, {p75})"),
+  digits = all_continuous()~2,
+  missing="no",
+  value=list(cm_chd~'Y', cm_stroke_any~'Y', cm_mi~'Y', cm_diabetes~'Y', cm_obesity~'Y', mortality_1yr~'Y', cm_dementia~'Y', cm_delirium~'Y', cm_depression~'Y', cm_asthma~'Y', cm_copd~'Y'),
+  label=list(ageAtFirstTest~'Age at first test', sex ~ 'Sex', simd2020Quintile ~ 'SIMD (Quintiles)', index_LOS ~ 'Length of stay (days)', cm_chd ~ 'Coronary Heart Disease', cm_stroke_any ~ 'Stroke', cm_mi ~ 'Myocardial infarction', cm_diabetes ~ 'Diabetes', cm_obesity ~ 'Obesity', cm_dementia ~ 'Dementia', cm_delirium ~ 'Delirium (not induced by alcohol)', cm_depression ~ 'Depression', cm_asthma ~ 'Asthma', 
+             cm_copd ~ 'COPD', mortality_1yr ~ 'Died (1-year after index admission)')
+) %>%
+  add_difference(everything()~'smd') %>%
+  bold_labels() %>%
+  modify_spanning_header(c('stat_1', 'stat_2')~"**COVID-19 Patient Characteristics (matched)**") %>%
+  modify_header(label="**Matching covariate**") %>%
+  modify_column_hide(all_stat_cols())
+
+covid_w_fin <- tbl_merge(list(cov_weighted, cov_diff)) %>%
+  modify_spanning_header(everything() ~ NA)
+#covid_w_fin
+
+covid_w_fin %>% as_gt() %>% gtsave("../<study_results>/<matched_table>.html")
+```
+
+```{r}
+#### Build characteristics table with rehab outcomes
+cov_weighted <- svydesign(ids=~1, data=covid_pts, weights=~ipw_weight) %>%
+  tbl_svysummary(
+  by=testPositive_10d,
+  include = c('total_mins_rehab',
+           'total_count_rehab', 'n_physio', 'n_occt', 'n_slt', 'n_diet', 'time_to_therapy', 'time_to_therapy_2', 'total_sum_ooh_rehab', 'rehab_to_los', 'testPositive_10d'),
+  statistic = list(all_continuous()~"{median} ({p25}, {p75})"),
+  missing="no",
+  digits = all_continuous()~2,
+  label=list(total_mins_rehab~'Total minutes of rehab', 
+             total_count_rehab~'Number of interventions',
+             time_to_therapy~'Time to first contact (days)',
+             time_to_therapy_2~'Time to second consecutive contact (days)',
+             total_sum_ooh_rehab~'Total minutes of rehab (out-of-hours)',
+             n_physio~'Physiotherapy (number of contacts)', 
+             n_occt ~'Occupational Therapy (number of contacts)', n_slt~'Speech and Language Therapy (number of contacts)', n_diet~'Dietetics (number of contacts)', rehab_to_los~'Minutes of rehab per day of hospitalisation')
+) %>%
+  add_p(pvalue_fun= ~style_pvalue(.x, digits=3)) %>%
+  bold_labels() %>%
+  modify_spanning_header(c('stat_1', 'stat_2')~"**COVID-19 Patient Characteristics (Unmatched)**") %>%
+  modify_header(label="**Rehab characteristic**")
+
+cov_diff <- svydesign(ids=~1, data=covid_pts, weights=~ipw_weight) %>%
+  tbl_svysummary(
+  by=testPositive_10d,
+  include = c('total_mins_rehab',
+           'total_count_rehab', 'n_physio', 'n_occt', 'n_slt', 'n_diet', 'time_to_therapy', 'time_to_therapy_2', 'total_sum_ooh_rehab', 'rehab_to_los', 'testPositive_10d'),
+  statistic = list(all_continuous()~"{median} ({p25}, {p75})"),
+  missing="no",
+  digits = all_continuous()~2,
+  label=list(total_mins_rehab~'Total minutes of rehab', 
+             total_count_rehab~'Number of interventions',
+             time_to_therapy~'Time to first contact (days)',
+             time_to_therapy_2~'Time to second consecutive contact (days)',
+             total_sum_ooh_rehab~'Total minutes of rehab (out-of-hours)',
+             n_physio~'Physiotherapy (number of contacts)', 
+             n_occt ~'Occupational Therapy (number of contacts)', n_slt~'Speech and Language Therapy (number of contacts)', n_diet~'Dietetics (number of contacts)', rehab_to_los~'Minutes of rehab per day of hospitalisation')
+) %>%
+  add_difference(everything()~'smd') %>%
+  bold_labels() %>%
+  modify_spanning_header(c('stat_1', 'stat_2')~"**COVID-19 Patient Characteristics (Unmatched)**") %>%
+  modify_header(label="**Rehab characteristic**") %>%
+  modify_column_hide(all_stat_cols())
+
+covid_w_fin <- tbl_merge(list(cov_weighted, cov_diff)) %>%
+  modify_spanning_header(everything() ~ NA)
+#covid_w_fin
+
+covid_w_fin %>% as_gt() %>% gtsave("../<study_results>/<matched_table_outcomes>.html")
+```
+
+
+#### Save weighted set of patients
+```{r}
+### Save initial weights
+cov_weighted <- svydesign(ids=~1, data=covid_pts, weights=~ipw_weight)
+save(cov_weighted, file='//<weights_file>.RData')
+
+write.csv(covid_pts, '//<study_folder>/<cohort_with_weights>.csv', row.names=FALSE)
+```
+
+
+#### Explore patient length-of-stay by intervention type
+```{r}
+summary(covid_pts[covid_pts$rehab_slt=='Performed',]$index_LOS)
+summary(covid_pts[covid_pts$rehab_slt=='Not Performed',]$index_LOS)
+wilcox.test(covid_pts[covid_pts$rehab_slt=='Performed',]$index_LOS, covid_pts[covid_pts$rehab_slt=='Not Performed',]$index_LOS)
+```
+
+```{r}
+#### Plot length-of-stay by intervention
+covid_pts$rehab_pt <- as.factor(covid_pts$rehab_pt)
+covid_pts$rehab_ot <- as.factor(covid_pts$rehab_ot)
+covid_pts$rehab_slt <- as.factor(covid_pts$rehab_slt)
+covid_pts$rehab_diet <- as.factor(covid_pts$rehab_diet)
+levels(covid_pts$rehab_pt) <- c('Not Performed', 'Performed')
+levels(covid_pts$rehab_ot) <- c('Not Performed', 'Performed')
+levels(covid_pts$rehab_slt) <- c('Not Performed', 'Performed')
+levels(covid_pts$rehab_diet) <- c('Not Performed', 'Performed')
+mu_pt <- ddply(covid_pts, 'rehab_pt', summarise, grp.median=median(index_LOS, na.rm=TRUE))
+mu_ot <- ddply(covid_pts, 'rehab_ot', summarise, grp.median=median(index_LOS, na.rm=TRUE))
+mu_slt <- ddply(covid_pts, 'rehab_slt', summarise, grp.median=median(index_LOS, na.rm=TRUE))
+mu_diet <- ddply(covid_pts, 'rehab_diet', summarise, grp.median=median(index_LOS, na.rm=TRUE))
+
+pc_pt <- ggplot(covid_pts, mapping=(aes(x=index_LOS, y=..density.., weight=ipw_weight,
+                                        color=rehab_pt, fill=rehab_pt))) +
+  geom_histogram(position='identity', alpha=0.5, bins=25) +
+  #geom_density(alpha=0.5) +
+  geom_vline(data=mu_pt, aes(xintercept=grp.median, color=rehab_pt), linetype='dashed') +
+  xlab('(A)') + ylab('') +
+  scale_color_manual(values=c('#999999', '#9C4C46', '#F22416'), name='Intervention') +
+  scale_fill_manual(values=c('#999999', '#9C4C46', '#F22416'), name='Intervention') + scale_y_continuous(labels=function (x) paste0(x*100, "%"), limits=c(0, 0.1), breaks=c(0, 0.02, 0.04, 0.06, 0.08, 0.1)) + xlim(min(covid_pts$index_LOS, na.rm=TRUE), 50) + theme_classic()
+
+pc_ot <- ggplot(covid_pts, mapping=(aes(x=index_LOS, y=..density.., weight=ipw_weight,
+                                        color=rehab_ot, fill=rehab_ot))) +
+  geom_histogram(position='identity', alpha=0.5, bins=25) +
+  #geom_density(alpha=0.5) +
+  geom_vline(data=mu_ot, aes(xintercept=grp.median, color=rehab_ot), linetype='dashed') +
+  xlim(min(covid_pts$index_LOS, na.rm=TRUE), 50) +
+  xlab('(B)') + ylab('') +
+  scale_color_manual(values=c('#999999', '#9C4C46', '#F22416'), name='Intervention') +
+  scale_fill_manual(values=c('#999999', '#9C4C46', '#F22416'), name='Intervention') + scale_y_continuous(labels=function (x) paste0(x*100, "%"), limits=c(0, 0.1), breaks=c(0, 0.02, 0.04, 0.06, 0.08, 0.1)) + xlim(min(covid_pts$index_LOS, na.rm=TRUE), 50) + theme_classic()
+
+pc_slt <- ggplot(covid_pts, mapping=(aes(x=index_LOS, y=..density.., weight=ipw_weight,
+                                        color=rehab_slt, fill=rehab_slt))) +
+  geom_histogram(position='identity', alpha=0.5, bins=25) +
+  #geom_density(alpha=0.5) +
+  geom_vline(data=mu_slt, aes(xintercept=grp.median, color=rehab_slt), linetype='dashed') +
+  xlim(min(covid_pts$index_LOS, na.rm=TRUE), 50) + 
+  xlab('(C)') + ylab('') +
+  scale_color_manual(values=c('#999999', '#9C4C46', '#F22416'), name='Intervention') +
+  scale_fill_manual(values=c('#999999', '#9C4C46', '#F22416'), name='Intervention') +     scale_y_continuous(labels=function (x) paste0(x*100, "%"), limits=c(0, 0.1), breaks=c(0, 0.02, 0.04, 0.06, 0.08, 0.1)) + xlim(min(covid_pts$index_LOS, na.rm=TRUE), 50) + theme_classic()
+
+pc_diet <- ggplot(covid_pts, mapping=(aes(x=index_LOS, y=..density.., weight=ipw_weight,
+                                        color=rehab_diet, fill=rehab_diet))) +
+  geom_histogram(position='identity', alpha=0.5, bins=25) +
+  #geom_density(alpha=0.5) +
+  geom_vline(data=mu_diet, aes(xintercept=grp.median, color=rehab_diet), linetype='dashed') +
+  xlim(min(covid_pts$index_LOS, na.rm=TRUE), 50) + 
+  xlab('(D)') + ylab('') +
+  scale_color_manual(values=c('#999999', '#9C4C46', '#F22416'), name='Intervention') +
+  scale_fill_manual(values=c('#999999', '#9C4C46', '#F22416'), name='Intervention') + 
+  scale_y_continuous(labels=function (x) paste0(x*100, "%"), limits=c(0, 0.1), breaks=c(0, 0.02, 0.04, 0.06, 0.08, 0.1)) + xlim(min(covid_pts$index_LOS, na.rm=TRUE), 50) + theme_classic()
+
+gg <- ggarrange(pc_pt, pc_ot, pc_slt, pc_diet, nrow=2, ncol=2, common.legend=TRUE, legend='top')
+annotate_figure(gg, top=text_grob('IPTW-adjusted length of stay of patients stratified by intervention', face='bold', size=12), left=text_grob('Proportion of patients', rot=90, vjust=1),
+                bottom=text_grob('Length of stay in days'))
+ggsave('//<study_folder>/<los_plot>.pdf', bg='white')
+```
+
+#### Length-of-stay by discharge specialty
+```{r}
+covid_pts <- covid_pts %>%
+  mutate(spec_other = ifelse((spec_general_medicine == 'N') & (spec_respiratory_medicine == 'N') & (spec_geriatric_medicine == 'N'), 'Y', 'N')) %>%
+  mutate(specialty = case_when(spec_general_medicine == 'Y' ~ 'General Medicine', 
+                               spec_respiratory_medicine == 'Y' ~ 'Respiratory Medicine',
+                               spec_geriatric_medicine == 'Y' ~ 'Geriatric Medicine',
+                               spec_other == 'Y' ~ 'Other')) %>%
+  mutate(specialty = factor(specialty, levels=c('General Medicine', 'Respiratory Medicine', 'Geriatric Medicine','Other')))
+```
+
+```{r}
+
+pc_pt <- ggplot(covid_pts[covid_pts$rehab_pt=='Received',], aes(x=Median_EpisodeLoSDays, y=..density.., group=specialty)) +
+  geom_density(aes(color=specialty), alpha=0.25, lwd=0.9) +
+  xlim(min(covid_pts[covid_pts$rehab_pt=='Received',]$Median_EpisodeLoSDays, na.rm=TRUE), 50) + ylim(0, 0.08) +
+  xlab('Physiotherapy') + ylab('Fraction of patients') +
+  scale_color_manual(values=c('#590c1f', '#0c0d59', '#30590c', '#999999'), name='Discharge specialty') +
+  theme_classic()
+
+pc_ot <- ggplot(covid_pts[covid_pts$rehab_ot=='Received',], aes(x=Median_EpisodeLoSDays, y=..density.., group=specialty)) +
+  geom_density(aes(color=specialty), alpha=0.25, lwd=0.9) +
+  xlim(min(covid_pts[covid_pts$rehab_ot=='Received',]$Median_EpisodeLoSDays, na.rm=TRUE), 50) + ylim(0, 0.08) +
+  xlab('Occupational therapy') + ylab('') +
+  scale_color_manual(values=c('#590c1f', '#0c0d59', '#30590c', '#999999'), name='Discharge specialty') +
+  theme_classic()
+
+pc_slt <- ggplot(covid_pts[covid_pts$rehab_slt=='Received',], aes(x=Median_EpisodeLoSDays, y=..density.., group=specialty)) +
+  geom_density(aes(color=specialty), alpha=0.25, lwd=0.9) +
+  xlim(min(covid_pts[covid_pts$rehab_slt=='Received',]$Median_EpisodeLoSDays, na.rm=TRUE), 50) + ylim(0, 0.08) +
+  xlab('Speech & Language Therapy') + ylab('Fraction of patients') +
+  scale_color_manual(values=c('#590c1f', '#0c0d59', '#30590c', '#999999'), name='Discharge specialty') +
+  theme_classic()
+
+pc_diet <- ggplot(covid_pts[covid_pts$rehab_diet=='Received',], aes(x=Median_EpisodeLoSDays, y=..density.., group=specialty)) +
+  geom_density(aes(color=specialty), alpha=0.25, lwd=0.9) +
+  xlim(min(covid_pts[covid_pts$rehab_diet=='Received',]$Median_EpisodeLoSDays, na.rm=TRUE), 50) + ylim(0, 0.08) +
+  xlab('Dietetics') + ylab('') +
+  scale_color_manual(values=c('#590c1f', '#0c0d59', '#30590c', '#999999'), name='Discharge specialty') +
+  theme_classic()
+
+gg <- ggarrange(pc_pt, pc_ot, pc_slt, pc_diet, nrow=2, ncol=2, common.legend=TRUE, legend='top')
+annotate_figure(gg, top=text_grob('Median LOS of patients receiving input from care provider (stratified by discharge specialty)', face='bold', size=12))
+```
+#### Stratify by age/comorbidities
+```{r}
+covid_pts <- covid_pts %>%
+  mutate(age_group = case_when(
+    ageAtFirstTest >= 18 & ageAtFirstTest < 65 ~ "18-64",
+    ageAtFirstTest >= 65 & ageAtFirstTest < 83 ~ "65-82",
+    ageAtFirstTest >= 83 ~ "Above 82",
+  ),
+age_group = factor(age_group, level=c('18-64', '65-82', 'Above 82')))
+
+table(covid_pts$age_group)
+```
+```{r}
+## Check median total rehab time
+summary(covid_pts[(covid_pts$age_group=='18-64') & (covid_pts$testPositive_10d_b==1),]$total_mins_rehab)
+summary(covid_pts[(covid_pts$age_group=='Above 82') & (covid_pts$testPositive_10d_b==0),]$total_mins_rehab)
+```
+
+
+```{r}
+pc_pt <- ggplot(covid_pts, aes(x=age_group, y=Median_EpisodeLoSDays, fill=rehab_pt)) +
+  geom_boxplot(outlier.shape=NA) + 
+  xlab('Physiotherapy (age group)') + ylab('Median LoS') + theme_classic() + scale_y_continuous(expand=c(0,0),
+                                                                         limits=c(-0.5,50)) +
+  scale_fill_discrete('Intervention')
+
+pc_ot <- ggplot(covid_pts, aes(x=age_group, y=Median_EpisodeLoSDays, fill=rehab_ot)) +
+  geom_boxplot(outlier.shape=NA) + 
+  xlab('Occupational Therapy (age group)') + ylab('') + theme_classic() + scale_y_continuous(expand=c(0,0),
+                                                                         limits=c(-0.5,50))
+
+pc_slt <- ggplot(covid_pts, aes(x=age_group, y=Median_EpisodeLoSDays, fill=rehab_slt)) +
+  geom_boxplot(outlier.shape=NA) + 
+  xlab('Speech & Language Therapy (age group)') + ylab('Median LoS') + theme_classic() + scale_y_continuous(expand=c(0,0),
+                                                                         limits=c(-0.5,50))
+
+pc_diet <- ggplot(covid_pts, aes(x=age_group, y=Median_EpisodeLoSDays, fill=rehab_diet)) +
+  geom_boxplot(outlier.shape=NA) + 
+  xlab('Dietetics (age group)') + ylab('') + theme_classic() + scale_y_continuous(expand=c(0,0),
+                                                                         limits=c(-0.5,50))
+
+gg <- ggarrange(pc_pt, pc_ot, pc_slt, pc_diet, nrow=2, ncol=2, common.legend=TRUE, legend='top')
+
+annotate_figure(gg, top=text_grob('Median LOS of rehab patients by intervention type (stratified by age)', face='bold', size=12))
+```
+```{r}
+covid_pts <- covid_pts %>%
+  mutate(n_morbid_cat = case_when(n_morbid==0~'0', n_morbid==1~'1', n_morbid>1~'2+')) %>%
+  mutate(n_morbid_cat = factor(n_morbid_cat, levels=c('0', '1', '2+')))
+
+table(covid_pts$n_morbid_cat)
+```
+
+
+```{r}
+pc_pt <- ggplot(covid_pts, aes(x=n_morbid_cat, y=Median_EpisodeLoSDays, fill=rehab_pt)) +
+  geom_boxplot(outlier.shape=NA) + 
+  xlab('Physiotherapy') + ylab('Median LoS') + theme_classic() + scale_y_continuous(expand=c(0,0),
+                                                                         limits=c(-0.5,50))  +
+  scale_fill_discrete('Intervention')
+
+pc_ot <- ggplot(covid_pts, aes(x=n_morbid_cat, y=Median_EpisodeLoSDays, fill=rehab_ot)) +
+  geom_boxplot(outlier.shape=NA) + 
+  xlab('Occupational Therapy') + ylab('') + theme_classic() + scale_y_continuous(expand=c(0,0),
+                                                                         limits=c(-0.5,50))
+
+pc_slt <- ggplot(covid_pts, aes(x=n_morbid_cat, y=Median_EpisodeLoSDays, fill=rehab_slt)) +
+  geom_boxplot(outlier.shape=NA) + 
+  xlab('Speech & Language Therapy') + ylab('Median LoS') + theme_classic() + scale_y_continuous(expand=c(0,0),
+                                                                         limits=c(-0.5,50))
+
+pc_diet <- ggplot(covid_pts, aes(x=n_morbid_cat, y=Median_EpisodeLoSDays, fill=rehab_diet)) +
+  geom_boxplot(outlier.shape=NA) + 
+  xlab('Dietetics') + ylab('') + theme_classic() + scale_y_continuous(expand=c(0,0),
+                                                                         limits=c(-0.5,50))
+
+gg <- ggarrange(pc_pt, pc_ot, pc_slt, pc_diet, nrow=2, ncol=2, common.legend=TRUE, legend='top')
+annotate_figure(gg, top=text_grob('Median LOS of rehab patients by intervention type (stratified by number of comorbidities)', face='bold', size=12))
+```
+#### Amount of rehab / Time to therapy densities
+```{r}
+### Estimate weights
+covid_pts$age_weights <- 0
+covid_pts$age_weights[covid_pts$age_group == '18-65'] <- covid_pts$ipw_weight[covid_pts$age_group == '18-65']/sum(covid_pts$ipw_weight[covid_pts$age_group == '18-65'])
+covid_pts$age_weights[covid_pts$age_group == '66-82'] <- covid_pts$ipw_weight[covid_pts$age_group == '66-82']/sum(covid_pts$ipw_weight[covid_pts$age_group == '66-82'])
+covid_pts$age_weights[covid_pts$age_group == 'Above 82'] <- covid_pts$ipw_weight[covid_pts$age_group == 'Above 82']/sum(covid_pts$ipw_weight[covid_pts$age_group == 'Above 82'])
+
+covid_pts$cm_weights <- 0
+covid_pts$cm_weights[covid_pts$n_morbid_cat == '0'] <- covid_pts$ipw_weight[covid_pts$n_morbid_cat == '0']/sum(covid_pts$ipw_weight[covid_pts$n_morbid_cat == '0'])
+covid_pts$cm_weights[covid_pts$n_morbid_cat == '1'] <- covid_pts$ipw_weight[covid_pts$n_morbid_cat == '1']/sum(covid_pts$ipw_weight[covid_pts$n_morbid_cat == '1'])
+covid_pts$cm_weights[covid_pts$n_morbid_cat == '2+'] <- covid_pts$ipw_weight[covid_pts$n_morbid_cat == '2+']/sum(covid_pts$ipw_weight[covid_pts$n_morbid_cat == '2+'])
+```
+
+```{r}
+covid_pts <- covid_pts %>%
+  mutate(testPositive_10d=recode(testPositive_10d,'Negative'='COVID-19 Negative', 'Positive'='COVID-19 Positive'))
+p <- ggdensity(rename(covid_pts[covid_pts$total_mins_rehab>0,], c("age_group"="Age Group")), x='total_mins_rehab', add='median', fill='Age Group', color='Age Group', palette=c('#00AFBB', '#E7B800', '#D15A60'), rug='FALSE', legend='top', alpha=0.35, font.legend=c(10, 'bold'), title='', facet.by = 'testPositive_10d') + 
+  xlim(0, 1000) +ylim(0, 0.007) + xlab('Total rehabilitation time (minutes)') + ylab('Population density') + theme(strip.text.x=element_text(size=10, face='bold'))
+gg <- ggarrange(p, nrow = 1, ncol=1, legend='right')
+annotate_figure(gg, top=text_grob('Total rehabilitation contact duration stratified by age group', face='bold', size=12))
+ggsave('//<study_folder>/<contact_duration_by_age>.pdf', bg='white')
+```
+
+```{r}
+p <- ggdensity(rename(covid_pts, c("n_morbid_cat"="Comorbidity Count")), x='total_mins_rehab', add='median', fill='Comorbidity Count', color='Comorbidity Count', palette=c('#98ccd9', '#6582e0', '#133fd1'), rug='FALSE', legend='top', alpha=0.35, font.legend=c(10, 'bold'), title='', facet.by = 'testPositive_10d') + 
+  xlim(0, 1000) +ylim(0, 0.007) + xlab('Total rehabilitation time (minutes)') + ylab('Population density') + theme(strip.text.x=element_text(size=10, face='bold'))
+gg <- ggarrange(p, nrow = 1, ncol=1, legend='right')
+annotate_figure(gg, top=text_grob('Total rehabilitation contact duration stratified by comorbidity count', face='bold', size=12))
+ggsave('//<study_folder>/<contact_duration_by_comorbidity>.pdf', bg='white')
+```
+#### Time to second contact plots
+```{r}
+covid_pts <- covid_pts %>%
+  mutate(specialty=case_when(spec_general_medicine=='Y' ~ 'General Medicine', spec_geriatric_medicine=='Y' ~ 
+                               'Geriatric Medicine', spec_respiratory_medicine=='Y' ~ 'Respiratory Medicine',
+                             TRUE ~ 'Other')) %>%
+  mutate(specialty=factor(specialty, levels=c('General Medicine', 'Respiratory Medicine', 'Geriatric Medicine',
+                                                 'Other')))
+```
+
+```{r}
+p <- ggdensity(rename(covid_pts[covid_pts$total_mins_rehab>0,], c("specialty"="Age Group")), x='total_mins_rehab', weight='age_weights', add='median', fill='Age Group', color='Age Group', palette=c('#00AFBB', '#E7B800', '#D15A60', '#6e736a'), rug='TRUE', legend='top', alpha=0.35, font.legend=c(10, 'bold'), title='', facet.by = c('second_contact_30d', 'testPositive_10d')) + 
+  xlim(0, 500) + xlab('Total rehabilitation time (minutes)') + ylab('Patient density') + theme(strip.text.x=element_text(size=10, face='bold'))
+gg <- ggarrange(p, nrow = 1, ncol=1, legend='right')
+annotate_figure(gg, top=text_grob('IPTW-adjusted total rehabilitation contact duration stratified by age group', face='bold', size=12))
+```
+```{r}
+### Box violin plot (x=covid, y=num interv, fill=second contact)
+
+p <- ggplot(covid_pts[(covid_pts$time_to_therapy_2 > 0)&(covid_pts$total_count_rehab<<adjusted_value>),], aes(x=testPositive_10d, y=time_to_therapy_2, weight=ipw_weight, fill=second_contact_30d)) + geom_violin(trim=FALSE) + geom_boxplot(width=0.1) + ylim(0,50)
+p
+```
+```{r}
+covid_pts_m <- covid_pts %>%
+  filter(index_LOS<<adjusted_value>)
+```
+
+```{r}
+covid_pts_m <- covid_pts %>%
+  filter(index_LOS<<adjusted_value>) %>%
+  mutate(second_contact_7d = factor(second_contact_7d) %>%
+           fct_recode("No second contact" = "0",
+                      "Second contact" = "1"))
+
+p <- grouped_ggbetweenstats(data=covid_pts_m, 
+                    x=testPositive_10d, 
+                    y=index_LOS,
+                    grouping.var = second_contact_7d,
+                    weight=ipw_weight, 
+                    centrality.type = 'np',
+                    point.args=list(alpha=0), 
+                    package='ggsci', 
+                    palette='nrc_npg', 
+                    type='np',
+                    conf.level=.95,
+                    median.color='black', 
+                    results.subtitle = FALSE,
+                    xlab = '',
+                    ylab = 'Length of stay (days)',
+                    annotation.args = list(title='IPTW-adjusted length of stay for patients with and without second consecutive 7-day contact', theme=list(plot.title=element_text(family='sans', size=11, face='bold'),axis.title=element_text(size=10), axis.text=element_text(size=10), plot.title.position = 'plot', text=element_text(size=9))
+                    ))
+p
+
+ggsave('//<study_folder>/<los_violin_plot_all>.pdf', bg='white')
+```
+```{r}
+
+p <- ggbetweenstats(data=covid_pts_m, 
+                    x=testPositive_10d, 
+                    y=index_LOS,
+                    weight=ipw_weight, 
+                    centrality.type = 'np',
+                    point.args=list(alpha=0),
+                    #centrality.label.args = list(alpha=0),
+                    package='ggsci', 
+                    palette='nrc_npg', 
+                    type='np',
+                    conf.level=.95,
+                    median.color='black', 
+                    results.subtitle = FALSE,
+                    xlab = '',
+                    ylab = 'Length of stay (days)',
+                    title='IPTW-adjusted length of stay for patients with second consecutive 7-day contact') +theme(plot.title=element_text(family='sans', size=11, face='bold'),
+                               axis.title=element_text(size=10), axis.text=element_text(size=10),          plot.title.position = 'plot', text=element_text(size=9))
+p
+ggsave('//<study_folder>/<los_violin_plot_7day_contacts>.pdf', bg='white')
+```
+
+```{r}
+covid_pts_m <- covid_pts %>%
+  filter(total_count_rehab<<adjusted_value>)
+
+p <- grouped_ggbetweenstats(data=covid_pts_m, 
+                    x=testPositive_10d, 
+                    y=time_to_therapy_2,
+                    grouping.var = second_contact_30d,
+                    weight=ipw_weight, 
+                    centrality.type = 'np',
+                    point.args=list(alpha=0), 
+                    package='ggsci', 
+                    palette='nrc_npg', 
+                    type='np',
+                    conf.level=.95,
+                    median.color='black', 
+                    results.subtitle = FALSE,
+                    xlab = '',
+                    ylab = 'Total rehabilitation contacts',
+                    annotation.args = list(title='IPTW-adjusted total rehabilitation contacts for patients with and without second consecutive 30-day contact', theme=list(plot.title=element_text(family='sans', size=11, face='bold'),axis.title=element_text(size=10), axis.text=element_text(size=10), plot.title.position = 'plot', text=element_text(size=9))
+                    ))
+p
+```
+#### Correlation plots (length-of-stay vs minutes of rehab)
+```{r}
+g <- ggscatter(covid_pts[covid_pts$total_mins_rehab>0,], x='Median_EpisodeLoSDays', y='total_mins_rehab',
+               color='black', shape=21, size=3, add.params=list(color='blue', fill='gray'),add='reg.line', conf.int=TRUE,
+               cor.coef = TRUE, cor.coeff.args = list(method='pearson', label.x=200, label.sep="\n"), title='Correlation plot between hospital length-of-stay and length of rehab') + ylim(0, 5000) + xlim(0,300) + xlab('Median Length-of-stay in hospital') + ylab('Total minutes of rehab treatment')
+g
+```
+```{r}
+g <- ggscatter(rename(covid_pts[covid_pts$total_mins_rehab>0,], c("age_group"="Age Group")), x='Median_EpisodeLoSDays', y='total_mins_rehab', color='Age Group', palette='YlOrRd', size=3, add.params=list(color='blue', fill='gray'),add='reg.line', conf.int=TRUE, cor.coef = TRUE, cor.coeff.args = list(method='pearson', label.x=200, label.sep="\n"), title='Correlation plot between hospital length-of-stay and length of rehab') + ylim(0, 5000) + xlim(0,300) + xlab('Median Length-of-stay in hospital') + ylab('Total minutes of rehab treatment')
+g
+```
+```{r}
+g <- ggscatter(rename(covid_pts[covid_pts$total_mins_rehab>0,], c("n_morbid_cat"="Comorbidity Group")), x='Median_EpisodeLoSDays', y='total_mins_rehab', color='Comorbidity Group', palette='Blues', size=3, add.params=list(color='blue', fill='gray'),add='reg.line', conf.int=TRUE, cor.coef = TRUE, cor.coeff.args = list(method='pearson', label.x=200, label.sep="\n"), title='Correlation plot between hospital length-of-stay and length of rehab') + ylim(0, 5000) + xlim(0,300) + xlab('Median Length-of-stay in hospital') + ylab('Total minutes of rehab treatment')
+g
+```

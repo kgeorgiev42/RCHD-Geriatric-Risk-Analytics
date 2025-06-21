@@ -1,141 +1,50 @@
-<a name="readme-top"></a>
-[![status: experimental](https://github.com/GIScience/badges/raw/master/status/experimental.svg)](https://github.com/GIScience/badges#experimental)
+# Harnessing Routine Data and Healthcare Contacts to Predict Risk and Treatment Requirements in Older People
 
-<!-- page header -->
-<br/>
-<div align="center">
-    <h2 align="center">Harnessing Routine Data and Healthcare Contacts to Predict Risk and Treatment Requirements in Older People</h2>
-    <h3 align="center">PhD Thesis repository</h3>
-    <p align="center">
-        Supporting codebase for PhD Thesis containing pipelines for analytics with routine healthcare data within NHS Lothian care systems, targeting geriatric healthcare pathways. 
-    </p>
-</div>
+PhD Thesis Codebase
 
-<!-- table of contents -->
+---
 
-<details>
-    <summary>Table of Contents</summary>
-    <ol>
-        <li>
-            <a href="#section-1">About the project</a>
-            <ul>
-                <li><a href="#section-1-1">Project Structure</a></li>
-                <li><a href="#section-1-2">Built With</a></li>
-                <li><a href="#section-1-3">Datasets</a></li>
-            </ul>
-        </li>
-        <li>
-            <a href="#section-2">Usage</a></li>
-            <ul>
-                <li><a href="#section-2-1">Output</a></li>
-                <li><a href="#section-2-2">Roadmap</a></li>
-            </ul>
-        </li>
-        <li>
-            <a href="#section-3">Contributing</a></li>
-            <ul>
-                <li><a href="#section-3-1">Contact</a></li>
-            </ul>
-        </li>
-        <li><a href="#section-4">License</a></li>
-</details>
+## Description
+This repository contains the supporting codebase for the PhD thesis titled **"Harnessing Routine Data and Healthcare Contacts to Predict Risk and Treatment Requirements in Older People"**. The codebase provides scripts for the analysis of routine healthcare data, focusing on risk prediction, treatment requirements, and care pathway analytics relevant to geriatric care planning. The original work is based on data from NHS Lothian care systems, conducted within [DataLoch](https://dataloch.org/) Secure Data Environments (SDEs).
 
+---
 
+## Codebase Structure
 
-<!-- Section 1 -->
-<a name="section-1"></a>
-### About
+- **data/**
+  - Currently contains the open [COCHRANE REH-COVER](https://rehabilitation.cochrane.org/special-projects/completed-special-projects/REH-COVER) summary data collated from previous systematic review rounds, used for the analysis in Chapter 4. Future data will include synthetic EHRs for Machine Learning and Process Mining pipelines.
 
-This repository holds code for the {PROJECT NAME} {SHORT DESCRIPTION}
+- **docs/**
+  - Basic documentation, including structured overviews of the analysis code and related work.
 
-[Link to any external reference sources/publications](https://)
+- **notebooks/**
+  - Jupyter and R Markdown notebooks and files covering the original data processing pipelines used to conduct the experiments within [DataLoch](https://dataloch.org/) Secure Data Enviroments:
+  1) `cv19_statistics`: relevant to statistical analysis and mapping for COVID-19 care pathways and rehabilitation interventions (covered in Chapters 4, 5 and 6)
+  2) `process_mining`: relevant to Process Mining analytics for comparison of care interactions between COVID-19 pandemic waves (covered in Chapter 6).
+  3) `geriatric_ml`: relevant to Machine Learning analytics for risk and resource predictions in urgently hospitalised older patients (covered in Chapter 8).
 
-_**Note:** Only public or fake data are shared in this repository._
+---
 
-<a name="section-1-1"></a>
-### Project Stucture
+## Work in Progress
+- The codebase is under active development to enable reproduction of these experiments on synthetic (dummy) healthcare data. Some scripts and pipelines are prototypes or in-progress. The `src/` folder will be used to construct data pipelines for Machine Learning and Process Mining analytics related to geriatric care pathways.
 
-- The main code is found in the root of the repository (see Usage below for more information)
-- The accompanying [report](./reports/report.pdf) is also available in the `reports` folder
-- More information about the code usage can be found in the [model card](./model_card.md)
-- {OTHER REPO STRUCTURE}
+---
 
-<a name="section-1-2"></a>
-### Built With
+## Citations
+If you use this codebase or its methods, please cite any of the related published work:
 
-[![Python v3.9](https://img.shields.io/badge/python-v3.9-blue.svg)](https://www.python.org/downloads/release/python-3916/)
-- {LIST OF MAIN PACKAGE VERSIONS}
+- Georgiev, K., Fleuriot, J.D., Papapanagiotou, P. et al. "Comparing Care Pathways Between COVID-19 Pandemic Waves Using Electronic Health Records: A Process Mining Case Study". *J Healthc Inform Res* 9, 41–66 (2025). https://doi.org/10.1007/s41666-024-00181-6
+- Georgiev, K., Fleuriot, J.D., Papapanagiotou, P. et al. "Comparing Care Pathways Between COVID-19 Pandemic Waves Using Electronic Health Records: A Process Mining Case Study." *J Healthc Inform Res* 9, 41–66 (2025). https://doi.org/10.1007/s41666-024-00181-6
+- Georgiev, K., McPeake, J., Shenkin, S.D. et al. "Understanding hospital activity and outcomes for people with multimorbidity using electronic health records". *Sci Rep* 15, 8522 (2025). https://doi.org/10.1038/s41598-025-92940-7
+- Georgiev, K., et al., "Predicting incident dementia in community-dwelling older adults using primary and secondary care data from electronic health records", **Brain Communications*, Volume 7, Issue 1, 2025, fcae469, https://doi.org/10.1093/braincomms/fcae469
 
-<a name="section-1-3"></a>
-#### Datasets
-{DESCRIPTION AND LINKS TO DATASETS}
+---
 
-{LINK TO FAKE DATA TO SUPPORT INITAIL CODE RUNS}
+## Acknowledgments
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+This thesis is supported by a PhD Fellowship award from the Sir Jules Thorn Charitable Trust (21/01PhD) as part of the University of Edinburgh’s Precision Medicine PhD programme.
 
+The original data studies were supported by [DataLoch](dataloch.org), which is core-funded by the [Data-Driven Innovation programme](ddi.ac.uk) within the Edinburgh and South East Scotland City Region Deal, and the [Chief Scientist Office](cso.scot.nhs.uk), Scottish Government.
 
-
-<!-- Section 2 -->
-<a name="section-2"></a>
-### Usage
-{DESCRIPTION OF CODE}
-
-<a name="section-2-1"></a>
-#### Outputs
-{LIST AND DESCRIPTION OF OUTPUTS}
-
-{NOTES ON REPRODUCIBILITY OF RESULTS}
-
-<a name="section-2-2"></a>
-### Roadmap
-
-See the {LINK TO REPO ISSUES} for a list of proposed features (and known issues).
-
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
-
-
-
-<!-- Section 3 -->
-<a name="section-3"></a>
-
-### Contributing
-
-Contributions are what make the open source community such an amazing place to learn, inspire, and create. Any contributions you make are **greatly appreciated**.
-
-1. Fork the Project
-2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the Branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
-_See [CONTRIBUTING.md](./CONTRIBUTING.md) for detailed guidance._
-
-<a name="section-3-1"></a>
-### Contact
-
-To access the Unified Data Access Layer (UDAL), please contact to our [Service Desk](mailto:NationalDataPlatform@england.nhs.uk) with the request form on [FutureNHS](https://future.nhs.uk/NCDR/view?objectId=22272688)
-
-<!-- ### Acknowledgements -->
-
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
-
-
-
-<!-- Section 4 -->
-<a name="section-4"></a>
-### License
-
-Unless stated otherwise, the codebase is released under [the MIT Licence][mit].
-This covers both the codebase and any sample code in the documentation.
-
-_See [LICENSE](./LICENSE) for more information._
-
-The documentation is [© Crown copyright][copyright] and available under the terms
-of the [Open Government 3.0][ogl] licence.
-
-[mit]: LICENCE
-[copyright]: http://www.nationalarchives.gov.uk/information-management/re-using-public-sector-information/uk-government-licensing-framework/crown-copyright/
-[ogl]: http://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/
-
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+## License
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.

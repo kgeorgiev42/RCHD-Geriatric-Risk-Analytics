@@ -1,0 +1,440 @@
+---
+title: "COVID-19 rehab patients propensity matching"
+output: html_notebook
+---
+
+#### Libraries and working directory
+
+```{r}
+library(tidyverse)
+library(knitr)
+library(lubridate)
+library(MatchIt)
+library(gridExtra)
+library(Matching)
+library(survey)
+library(tableone)
+library(ggplot2)
+library(reshape2)
+library(rgenoud)
+library(optmatch)
+library(modelsummary)
+library(broom)
+library(sandwich)
+```
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE)
+knitr::opts_knit$set(root.dir = "//<study_data_folder>")
+```
+```{r}
+sessionInfo()
+```
+#### Load data
+```{r}
+covid_pts <- read.csv("../<cohort_file>.csv")
+head(covid_pts)
+dim(covid_pts)
+length(unique(covid_pts$pid))
+```
+
+
+#### Adjust for population with 2+ 7-day contacts
+```{r}
+table(covid_pts$testPositive_10d)
+table(covid_pts[covid_pts$received_rehab==1,]$testPositive_10d)
+```
+
+```{r}
+covid_pts <- covid_pts %>%
+  filter(second_contact_7d == '2+')
+```
+
+#### Validate population counts
+```{r}
+table(covid_pts$testPositive_10d)
+```
+
+
+```{r}
+ggplot(covid_pts, aes(x=ageAtFirstTest)) + geom_bar()
+ggplot(covid_pts, aes(x=wasFirstTestPositive)) + geom_bar()
+ggplot(covid_pts, aes(x=numberOfTests)) + geom_bar() + xlim(min(covid_pts$numberOfTests, na.rm=TRUE), 50)
+ggplot(covid_pts, aes(x=Median_EpisodeLoSDays)) + geom_bar() + xlim(min(covid_pts$EpisodeLoSDays, na.rm=TRUE), 50)
+ggplot(covid_pts, aes(x=died_during_stay)) + geom_bar()
+ggplot(covid_pts, aes(x=n_morbid)) + geom_bar()
+ggplot(covid_pts, aes(x=is_multimorbid)) + geom_bar()
+ggplot(covid_pts, aes(x=is_complex_multimorbid)) + geom_bar()
+ggplot(covid_pts, aes(x=mortality_1yr)) + geom_bar()
+ggplot(covid_pts, aes(x=time_to_therapy)) + geom_bar() + xlim(0, 100)
+```
+#### Generate "high rehabilitation requirements" field using the 90th percentile of the total minutes
+```{r}
+quantile(covid_pts$total_mins_rehab, probs=seq(.1, .9, by=.1))
+```
+```{r}
+covid_pts <- covid_pts %>%
+  mutate(high_rehab_90p = ifelse(total_mins_rehab >= <quantile_value>, 1, 0))
+
+ggplot(covid_pts, aes(x=high_rehab_90p)) + geom_bar()
+prop.table(table(covid_pts$high_rehab_90p))
+table(covid_pts$high_rehab_90p)
+```
+
+
+#### Use propensity matching to create a control group for negative patients
+
+#### Helper functions and setup
+```{r}
+### Covariates
+covid_cov <- c('ageAtFirstTest', 'sex', 'simd2020Quintile', 'cm_chd', 'cm_stroke_any', 'cm_mi', 'cm_diabetes', 'cm_obesity', 'cm_dementia', 'cm_delirium', 'cm_depression', 'cm_asthma', 'cm_copd')
+
+covid_pts <- covid_pts %>%
+  mutate(simd2020Quintile=as.factor(simd2020Quintile)) %>%
+  mutate(sex=as.factor(sex)) %>%
+  mutate(died_during_stay=ifelse(died_during_stay==0, 'N', 'Y')) %>%
+  mutate(mortality_1yr=ifelse(mortality_1yr==0, 'N', 'Y')) %>%
+  mutate(is_multimorbid=ifelse(is_multimorbid==0, 'N', 'Y')) %>%
+  rowwise() %>%
+  mutate(rehab_pt=ifelse(grepl('Physiotherapy', rehab_interventions), 'Y', 'N')) %>%
+  mutate(rehab_ot=ifelse(grepl('Occupational Therapy', rehab_interventions) > 0, 'Y', 'N')) %>%
+  mutate(rehab_slt=ifelse(grepl('Speech and Language Therapy', rehab_interventions) > 0, 'Y', 'N')) %>%
+  mutate(rehab_diet=ifelse(grepl('Dietetics', rehab_interventions) > 0, 'Y', 'N')) %>%
+  ungroup() %>%
+  mutate(cm_chd=ifelse(cm_chd==0, 'N', 'Y')) %>%
+  mutate(cm_stroke_any=ifelse(cm_stroke_any==0, 'N', 'Y')) %>%
+  mutate(cm_mi=ifelse(cm_mi==0, 'N', 'Y')) %>%
+  mutate(cm_diabetes=ifelse(cm_diabetes==0, 'N', 'Y')) %>%
+  mutate(cm_obesity=ifelse(cm_obesity==0, 'N', 'Y')) %>%
+  mutate(cm_hip_fracture=ifelse(cm_hip_fracture==0, 'N', 'Y')) %>%
+  mutate(cm_dementia=ifelse(cm_dementia==0, 'N', 'Y')) %>%
+  mutate(cm_delirium=ifelse(cm_delirium==0, 'N', 'Y')) %>%
+  mutate(cm_depression=ifelse(cm_depression==0, 'N', 'Y')) %>%
+  mutate(cm_asthma=ifelse(cm_asthma==0, 'N', 'Y')) %>%
+  mutate(cm_copd=ifelse(cm_copd==0, 'N', 'Y')) %>%
+  mutate(testPositive_10d=ifelse(testPositive_10d==0, 'Negative', 'Positive'))
+
+covid_pts <- covid_pts %>% mutate(testPositive_10d_b=ifelse(testPositive_10d=='Negative', 0, 1))
+
+```
+```{r}
+table(covid_pts$received_rehab)
+```
+
+
+```{r}
+get_relative_risk <- function(data, treatment, outcome, weights=NA){
+  if(any(is.na(weights))){
+    model_log <- glm(outcome ~ treatment, family=binomial(link='log'), data=data)
+    model_id <- glm(outcome ~ treatment, family=binomial(link='identity'), data=data)
+  }
+  else {
+    model_log <- glm(outcome ~ treatment, weights=weights, family=binomial(link='log'), data=data)
+    model_id <- glm(outcome ~ treatment, weights=weights, family=binomial(link='identity'), data=data)
+  }
+  beta_ipw_log <- coef(model_log)
+  beta_ipw_id <- coef(model_id)
+  ## Use asymptotic (sandwich) variance to account for weighted population
+  sand_var_log <- sqrt(diag(vcovHC(model_log, type='HC0')))
+  sand_var_id <- sqrt(diag(vcovHC(model_id, type='HC0')))
+  ### Get risk estimate for log
+  causal_rr <- exp(beta_ipw_log[2])
+  lcl <- exp(beta_ipw_log[2]-1.96*sand_var_log[2])
+  ucl <- exp(beta_ipw_log[2]+1.96*sand_var_log[2])
+  ### Get risk estimate for identity model
+  causal_rr_id <- round(beta_ipw_id[2], 5)
+  lcl_id <- round(beta_ipw_id[2]-1.96*sand_var_id[2], 5)
+  ucl_id <- round(beta_ipw_id[2]+1.96*sand_var_id[2], 5)
+  return(c(c(causal_rr_id, lcl_id, ucl_id), c(causal_rr, lcl, ucl), AIC(model_log), AIC(model_id)))
+}
+```
+
+
+#### Print unmatched data
+```{r}
+covid_unmatched <- CreateTableOne(vars=covid_cov, data=covid_pts, strata="testPositive_10d")
+print(covid_unmatched, smd=TRUE, nonnormal=TRUE)
+addmargins(table(ExtractSmd(covid_unmatched) > 0.1))
+
+### Save SMD Scores and risk metrics
+unmatched_df <- data.frame(print(covid_unmatched, nonnormal=TRUE, smd=TRUE, exact='stage', quote=FALSE, noSpaces=TRUE, printToggle=FALSE))
+unmatched_smd_max <- round(max(as.numeric(unmatched_df$SMD), na.rm=TRUE), 3)
+unmatched_smd_mean <- round(mean(as.numeric(unmatched_df$SMD), na.rm=TRUE), 3)
+unmatched_risk <- unname(unlist(get_relative_risk(covid_pts, covid_pts$testPositive_10d, covid_pts$high_rehab_90p)))
+unmatched_pop <- sum(as.numeric(unname(unlist(unmatched_df['n',1:2]))))
+```
+#### Fit initial propensity score logistic model
+```{r}
+set.seed(42)
+### Make target variable a factor
+covid_pts$testPositive_10d <- as.factor(covid_pts$testPositive_10d)
+### Fit model to get probabilities for positive/negative patients
+cov_model <- glm(testPositive_10d ~ ageAtFirstTest + simd2020Quintile + sex + cm_chd + cm_stroke_any + cm_mi + cm_diabetes + cm_obesity + cm_dementia + cm_delirium + cm_depression + cm_asthma + cm_copd, data=covid_pts, family=binomial(link='logit'))
+cov_preds <- predict(cov_model, type='response')
+
+summary(cov_model)
+covid_pts$prop_score <- cov_preds
+ggplot(covid_pts, aes(x=prop_score, y=..density..)) + geom_histogram() + facet_grid(~testPositive_10d) + theme_bw() + ylim(0,5)
+```
+#### IPW standard model
+```{r}
+weight <- ifelse(covid_pts$testPositive_10d=='Positive', 1/(cov_preds), 1/(1-cov_preds))
+cov_weighted <- svydesign(ids=~1, data=covid_pts, weights=~weight)
+ipw_table <- svyCreateTableOne(vars=covid_cov, strata='testPositive_10d', test=FALSE, data=cov_weighted)
+print(ipw_table, smd=TRUE, nonnormal=TRUE)
+addmargins(table(ExtractSmd(ipw_table) > 0.1))
+covid_pts$ipw_weight <- weight
+
+### Save SMD Scores and risk metrics
+ipw_df <- data.frame(print(ipw_table, smd=TRUE, nonnormal=TRUE, exact='stage', quote=FALSE, noSpaces=TRUE, printToggle=FALSE))
+ipw_smd_max <- round(max(as.numeric(ipw_df$SMD), na.rm=TRUE), 3)
+ipw_smd_mean <- round(mean(as.numeric(ipw_df$SMD), na.rm=TRUE), 3)
+ipw_risk <- round(unname(unlist(get_relative_risk(covid_pts, covid_pts$testPositive_10d, covid_pts$high_rehab_90p, covid_pts$ipw_weight))), 5)
+ipw_pop <- unmatched_pop
+```
+#### Summarize initial weights
+```{r}
+summary(weight)
+tail(sort(weight))
+head(sort(weight))
+
+ggplot(covid_pts, aes(x=ipw_weight)) + geom_density(color='darkblue', fill='darkblue') + ylim(0, 0.25)
+ggplot(covid_pts, aes(x=as.numeric(row.names(covid_pts)), y=sort(ipw_weight))) + geom_line(linetype='dashed') + xlab('Patient index') + ylab('Weighted score')
+```
+
+#### Fit IPW model with truncation at 99th/1st percentile
+```{r}
+covid_pts_trunc <- covid_pts %>%
+  filter((ipw_weight < quantile(ipw_weight, 0.99)) & (ipw_weight > quantile(ipw_weight, 0.01)))
+
+dim(covid_pts_trunc)
+dim(covid_pts)
+
+cov_weighted_tr <- svydesign(ids=~1, data=covid_pts_trunc, weights=~covid_pts_trunc$ipw_weight)
+ipw_table_tr <- svyCreateTableOne(vars=covid_cov, strata='testPositive_10d', test=FALSE, data=cov_weighted_tr)
+print(ipw_table_tr, smd=TRUE, nonnormal=TRUE)
+addmargins(table(ExtractSmd(ipw_table_tr) > 0.1))
+
+summary(covid_pts_trunc$ipw_weight)
+tail(sort(covid_pts_trunc$ipw_weight))
+head(sort(covid_pts_trunc$ipw_weight))
+
+ggplot(covid_pts_trunc, aes(x=ipw_weight)) + geom_density(color='darkblue', fill='darkblue') + ylim(0, 0.25)
+ggplot(covid_pts_trunc, aes(x=as.numeric(row.names(covid_pts_trunc)), y=sort(ipw_weight))) + geom_line(linetype='dashed') + xlab('Patient index') + ylab('Weighted score')
+
+### Save SMD Scores and risk metrics
+ipw_trunc_df <- data.frame(print(ipw_table_tr, smd=TRUE, nonnormal=TRUE, exact='stage', quote=FALSE, noSpaces=TRUE, printToggle=FALSE))
+ipw_tr_smd_max <- round(max(as.numeric(ipw_trunc_df$SMD), na.rm=TRUE), 3)
+ipw_tr_smd_mean <- round(mean(as.numeric(ipw_trunc_df$SMD), na.rm=TRUE), 3)
+ipw_tr_risk <- round(unname(unlist(get_relative_risk(covid_pts_trunc, covid_pts_trunc$testPositive_10d, covid_pts_trunc$high_rehab_90p, covid_pts_trunc$ipw_weight))), 5)
+ipw_tr_pop <- unmatched_pop
+```
+
+#### Propensity match (nearest neighbors)
+```{r}
+covid_pts <- covid_pts %>%
+  mutate(is_multimorbid=ifelse(is_multimorbid=='N', 0, 1)) %>%
+  mutate(cm_chd=ifelse(cm_chd=='N', 0, 1)) %>%
+  mutate(cm_stroke_any=ifelse(cm_stroke_any=='N', 0, 1)) %>%
+  mutate(cm_mi=ifelse(cm_mi=='N', 0, 1)) %>%
+  mutate(cm_diabetes=ifelse(cm_diabetes=='N', 0, 1)) %>%
+  mutate(cm_obesity=ifelse(cm_obesity=='N', 0, 1)) %>%
+  mutate(cm_hip_fracture=ifelse(cm_hip_fracture=='N', 0, 1)) %>%
+  mutate(cm_dementia=ifelse(cm_dementia=='N', 0, 1)) %>%
+  mutate(cm_delirium=ifelse(cm_delirium=='N', 0, 1)) %>%
+  mutate(cm_depression=ifelse(cm_depression=='N', 0, 1)) %>%
+  mutate(cm_asthma=ifelse(cm_asthma=='N', 0, 1)) %>%
+  mutate(cm_copd=ifelse(cm_copd=='N', 0, 1))
+```
+
+```{r}
+#### Match scores (propensity score)
+set.seed(42)
+cov_match_p <- matchit(testPositive_10d_b ~ ageAtFirstTest + simd2020Quintile + sex + cm_chd + cm_stroke_any + cm_mi + cm_diabetes + cm_obesity + cm_dementia + cm_delirium + cm_depression + cm_asthma + cm_copd, data=covid_pts, method='nearest', distance='glm')
+
+covid_matched_p <- match.data(cov_match_p)
+covid_matched_p <- covid_matched_p %>%
+  mutate(cm_chd=ifelse(cm_chd==0, 'N', 'Y')) %>%
+  mutate(cm_stroke_any=ifelse(cm_stroke_any==0, 'N', 'Y')) %>%
+  mutate(cm_mi=ifelse(cm_mi==0, 'N', 'Y')) %>%
+  mutate(cm_diabetes=ifelse(cm_diabetes==0, 'N', 'Y')) %>%
+  mutate(cm_obesity=ifelse(cm_obesity==0, 'N', 'Y')) %>%
+  mutate(cm_hip_fracture=ifelse(cm_hip_fracture==0, 'N', 'Y')) %>%
+  mutate(cm_dementia=ifelse(cm_dementia==0, 'N', 'Y')) %>%
+  mutate(cm_delirium=ifelse(cm_delirium==0, 'N', 'Y')) %>%
+  mutate(cm_depression=ifelse(cm_depression==0, 'N', 'Y')) %>%
+  mutate(cm_asthma=ifelse(cm_asthma==0, 'N', 'Y')) %>%
+  mutate(cm_copd=ifelse(cm_copd==0, 'N', 'Y')) %>% 
+  mutate(is_multimorbid=ifelse(is_multimorbid==0, 'N', 'Y'))
+  
+tab_matched_p <- CreateTableOne(vars=covid_cov, strata='testPositive_10d', data=covid_matched_p, test=FALSE)
+print(tab_matched_p, smd=TRUE, nonnormal=TRUE)
+addmargins(table(ExtractSmd(tab_matched_p) > 0.1))
+
+### Save SMD Scores and risk metrics
+pr_nn_df <- data.frame(print(tab_matched_p, smd=TRUE, nonnormal=TRUE, exact='stage', quote=FALSE, noSpaces=TRUE, printToggle=FALSE))
+pr_nn_smd_max <- round(max(as.numeric(pr_nn_df$SMD), na.rm=TRUE), 3)
+pr_nn_smd_mean <- round(mean(as.numeric(pr_nn_df$SMD), na.rm=TRUE), 3)
+pr_nn_risk <- round(unname(unlist(get_relative_risk(covid_matched_p, covid_matched_p$testPositive_10d, covid_matched_p$high_rehab_90p))), 5)
+pr_nn_pop <- sum(as.numeric(unname(unlist(pr_nn_df['n',1:2]))))
+```
+#### Propensity match (mahalanobis distance)
+```{r}
+set.seed(100)
+cov_match_m <- matchit(testPositive_10d_b ~ ageAtFirstTest + simd2020Quintile + sex + cm_chd + cm_stroke_any + cm_mi + cm_diabetes + cm_obesity + cm_dementia + cm_delirium + cm_depression + cm_asthma + cm_copd, data=covid_pts, method='nearest', distance='mahalanobis')
+
+covid_matched_m <- match.data(cov_match_m)
+covid_matched_m <- covid_matched_m %>%
+  mutate(cm_chd=ifelse(cm_chd==0, 'N', 'Y')) %>%
+  mutate(cm_stroke_any=ifelse(cm_stroke_any==0, 'N', 'Y')) %>%
+  mutate(cm_mi=ifelse(cm_mi==0, 'N', 'Y')) %>%
+  mutate(cm_diabetes=ifelse(cm_diabetes==0, 'N', 'Y')) %>%
+  mutate(cm_obesity=ifelse(cm_obesity==0, 'N', 'Y')) %>%
+  mutate(cm_hip_fracture=ifelse(cm_hip_fracture==0, 'N', 'Y')) %>%
+  mutate(cm_dementia=ifelse(cm_dementia==0, 'N', 'Y')) %>%
+  mutate(cm_delirium=ifelse(cm_delirium==0, 'N', 'Y')) %>%
+  mutate(cm_depression=ifelse(cm_depression==0, 'N', 'Y')) %>%
+  mutate(cm_asthma=ifelse(cm_asthma==0, 'N', 'Y')) %>%
+  mutate(cm_copd=ifelse(cm_copd==0, 'N', 'Y')) %>% 
+  mutate(is_multimorbid=ifelse(is_multimorbid==0, 'N', 'Y'))
+tab_matched_m <- CreateTableOne(vars=covid_cov, strata='testPositive_10d', data=covid_matched_m, test=FALSE)
+print(tab_matched_m, smd=TRUE, nonnormal=TRUE)
+addmargins(table(ExtractSmd(tab_matched_m) > 0.1))
+
+### Save SMD Scores and risk metrics
+pr_md_df <- data.frame(print(tab_matched_m, smd=TRUE, nonnormal=TRUE, exact='stage', quote=FALSE, noSpaces=TRUE, printToggle=FALSE))
+pr_md_smd_max <- round(max(as.numeric(pr_md_df$SMD), na.rm=TRUE), 3)
+pr_md_smd_mean <- round(mean(as.numeric(pr_md_df$SMD), na.rm=TRUE), 3)
+pr_md_risk <- round(unname(unlist(get_relative_risk(covid_matched_m, covid_matched_m$testPositive_10d, covid_matched_m$high_rehab_90p))), 5)
+pr_md_pop <- sum(as.numeric(unname(unlist(pr_md_df['n',1:2]))))
+```
+
+#### Propensity match (genetic algorithms)
+```{r}
+set.seed(100)
+cov_match_g <- matchit(testPositive_10d_b ~ ageAtFirstTest + simd2020Quintile + sex + cm_chd + cm_stroke_any + cm_mi + cm_diabetes + cm_obesity + cm_dementia + cm_delirium + cm_depression + cm_asthma + cm_copd, data=covid_pts, method='genetic', distance='mahalanobis', pop.size=10)
+
+covid_matched_g <- match.data(cov_match_g)
+covid_matched_g <- covid_matched_g %>%
+  mutate(cm_chd=ifelse(cm_chd==0, 'N', 'Y')) %>%
+  mutate(cm_stroke_any=ifelse(cm_stroke_any==0, 'N', 'Y')) %>%
+  mutate(cm_mi=ifelse(cm_mi==0, 'N', 'Y')) %>%
+  mutate(cm_diabetes=ifelse(cm_diabetes==0, 'N', 'Y')) %>%
+  mutate(cm_obesity=ifelse(cm_obesity==0, 'N', 'Y')) %>%
+  mutate(cm_hip_fracture=ifelse(cm_hip_fracture==0, 'N', 'Y')) %>%
+  mutate(cm_dementia=ifelse(cm_dementia==0, 'N', 'Y')) %>%
+  mutate(cm_delirium=ifelse(cm_delirium==0, 'N', 'Y')) %>%
+  mutate(cm_depression=ifelse(cm_depression==0, 'N', 'Y')) %>%
+  mutate(cm_asthma=ifelse(cm_asthma==0, 'N', 'Y')) %>%
+  mutate(cm_copd=ifelse(cm_copd==0, 'N', 'Y')) %>% 
+  mutate(is_multimorbid=ifelse(is_multimorbid==0, 'N', 'Y'))
+tab_matched_g <- CreateTableOne(vars=covid_cov, strata='testPositive_10d', data=covid_matched_g, test=FALSE)
+print(tab_matched_g, smd=TRUE, nonnormal=TRUE)
+addmargins(table(ExtractSmd(tab_matched_g) > 0.1))
+
+### Save SMD Scores and risk metrics
+pr_gen_df <- data.frame(print(tab_matched_g, smd=TRUE, nonnormal=TRUE, exact='stage', quote=FALSE, noSpaces=TRUE, printToggle=FALSE))
+pr_gen_smd_max <- round(max(as.numeric(pr_gen_df$SMD), na.rm=TRUE), 3)
+pr_gen_smd_mean <- round(mean(as.numeric(pr_gen_df$SMD), na.rm=TRUE), 3)
+pr_gen_risk <- round(unname(unlist(get_relative_risk(covid_matched_g, covid_matched_g$testPositive_10d, covid_matched_g$high_rehab_90p))), 5)
+pr_gen_pop <- sum(as.numeric(unname(unlist(pr_gen_df['n',1:2]))))
+```
+
+#### Evaluating balance
+```{r}
+model_list <- list(Unmatched = c('Model' = 'Unmatched','SMD (max)' = unmatched_smd_max, 'SMD (mean)' = unmatched_smd_mean, 
+                                 'Risk Difference' = paste(round(unmatched_risk[1],3),'[',round(unmatched_risk[2],3),',',round(unmatched_risk[3],3),']', collapse=' '), 
+                                 'Relative Risk' = paste(round(unmatched_risk[4],3),'[',round(unmatched_risk[5], 3),',',round(unmatched_risk[6],3),']', collapse=' ') , 'AIC' = round(unmatched_risk[7], 3), 'Population' = unmatched_pop),
+                   
+                   IPW = c('Model' = 'IPW','SMD (max)' = ipw_smd_max, 'SMD (mean)' = ipw_smd_mean, 
+                                 'Risk Difference' = paste(round(ipw_risk[1],3),'[',round(ipw_risk[2],3),',',round(ipw_risk[3],3),']', collapse=' '), 
+                                 'Relative Risk' = paste(round(ipw_risk[4],3),'[',round(ipw_risk[5], 3),',',round(ipw_risk[6],3),']', collapse=' ') , 'AIC' = round(ipw_risk[7], 3), 'Population' = ipw_pop),
+                   
+                   IPW_trunc = c('Model' = 'IPW (truncated at 99th percentile)','SMD (max)' = ipw_tr_smd_max, 'SMD (mean)' = ipw_tr_smd_mean, 
+                                 'Risk Difference' = paste(round(ipw_tr_risk[1],3),'[',round(ipw_tr_risk[2],3),',',round(ipw_tr_risk[3],3),']', collapse=' '), 
+                                 'Relative Risk' = paste(round(ipw_tr_risk[4],3),'[',round(ipw_tr_risk[5], 3),',',round(ipw_tr_risk[6],3),']', collapse=' ') , 'AIC' = round(ipw_tr_risk[7], 3), 'Population' = ipw_tr_pop),
+                   
+                   Matched_nn = c('Model' = 'Propensity match (nearest neighbors)','SMD (max)' = pr_nn_smd_max, 'SMD (mean)' = pr_nn_smd_mean, 
+                                 'Risk Difference' = paste(round(pr_nn_risk[1],3),'[',round(pr_nn_risk[2],3),',',round(pr_nn_risk[3],3),']', collapse=' '), 
+                                 'Relative Risk' = paste(round(pr_nn_risk[4],3),'[',round(pr_nn_risk[5], 3),',',round(pr_nn_risk[6],3),']', collapse=' ') , 'AIC' = round(pr_nn_risk[7], 3), 'Population' = pr_nn_pop),
+                   
+                   Matched_md = c('Model' = 'Propensity match (mahalanobis distance)','SMD (max)' = pr_md_smd_max, 'SMD (mean)' = pr_md_smd_mean, 
+                                 'Risk Difference' = paste(round(pr_md_risk[1],3),'[',round(pr_md_risk[2],3),',',round(pr_md_risk[3],3),']', collapse=' '), 
+                                 'Relative Risk' = paste(round(pr_md_risk[4],3),'[',round(pr_md_risk[5], 3),',',round(pr_md_risk[6],3),']', collapse=' ') , 'AIC' = round(pr_md_risk[7], 3), 'Population' = pr_md_pop),
+                   
+                   Matched_gen = c('Model' = 'Propensity match (genetic)','SMD (max)' = pr_gen_smd_max, 'SMD (mean)' = pr_gen_smd_mean, 
+                                 'Risk Difference' = paste(round(pr_gen_risk[1],3),'[',round(pr_gen_risk[2],3),',',round(pr_gen_risk[3],3),']', collapse=' '), 
+                                 'Relative Risk' = paste(round(pr_gen_risk[4],3),'[',round(pr_gen_risk[5], 3),',',round(pr_gen_risk[6],3),']', collapse=' ') , 'AIC' = round(pr_gen_risk[7], 3), 'Population' = pr_gen_pop)
+                   
+                   )
+
+eval_df <- bind_rows(model_list)
+eval_df <- map_df(model_list, bind_rows)
+eval_df <- map_df(model_list, ~.x)
+rownames(eval_df) <- eval_df$Model
+
+head(eval_df)
+```
+
+```{r}
+smd_set <- data.frame(variable = rownames(ExtractSmd(covid_unmatched)),
+                      Unmatched = as.numeric(ExtractSmd(covid_unmatched)),
+                      IPW = as.numeric(ExtractSmd(ipw_table)),
+                      IPW_truncated = as.numeric(ExtractSmd(ipw_table_tr)),
+                      Matched_NN = as.numeric(ExtractSmd(tab_matched_p)),
+                      Matched_MD = as.numeric(ExtractSmd(tab_matched_m)),
+                      Matched_genetic = as.numeric(ExtractSmd(tab_matched_g)))
+
+smd_set <- smd_set %>%
+  mutate(variable=str_replace_all(variable, 'ageAtFirstTest', 'Age at first test')) %>%
+  mutate(variable=str_replace_all(variable, 'simd2020Quintile', 'SIMD Quintile')) %>%
+  mutate(variable=str_replace_all(variable, 'sex', 'Sex')) %>%
+  mutate(variable=str_replace_all(variable, 'cm_chd', 'Coronoary Heart Disease')) %>%
+  mutate(variable=str_replace_all(variable, 'cm_stroke_any', 'Stroke')) %>%
+  mutate(variable=str_replace_all(variable, 'cm_mi', 'Myocardial Infarction')) %>%
+  mutate(variable=str_replace_all(variable, 'cm_diabetes', 'Diabetes')) %>%
+  mutate(variable=str_replace_all(variable, 'cm_obesity', 'Obesity')) %>%
+  mutate(variable=str_replace_all(variable, 'cm_dementia', 'Dementia')) %>%
+  mutate(variable=str_replace_all(variable, 'cm_delirium', 'Delirium')) %>%
+  mutate(variable=str_replace_all(variable, 'cm_depression', 'Depression')) %>%
+  mutate(variable=str_replace_all(variable, 'cm_asthma', 'Asthma')) %>%
+  mutate(variable=str_replace_all(variable, 'cm_copd', 'COPD'))
+
+smd_melt <- melt(data=smd_set, id.vars=c('variable'), variable.name='Method', value.name='SMD')
+smd_melt <- smd_melt %>%
+  mutate(Method=str_replace_all(Method, 'IPW', 'IPTW')) %>%
+  mutate(Method=str_replace_all(Method, 'IPTW_truncated', 'IPTW (truncated at 99th percentile)')) %>%
+  mutate(Method=str_replace_all(Method, 'Matched_NN', 'Propensity match (nearest neighbors)')) %>%
+  mutate(Method=str_replace_all(Method, 'Matched_MD', 'Propensity match (mahalanobis distance)')) %>%
+  mutate(Method=str_replace_all(Method, 'Matched_genetic', 'Propensity match (genetic)'))
+
+varNames <- as.character(smd_set$variable)
+smd_melt$variable <- factor(smd_melt$variable, levels=varNames)
+gg <- ggplot(data=smd_melt, mapping=aes(x=variable, y=SMD, group=Method, color=Method)) +
+  geom_line() +
+  geom_point() +
+  geom_hline(yintercept=0.1, color='black', size=0.1) +
+  coord_flip() +
+  theme_bw() + theme(legend.key=element_blank())
+
+gg
+
+ggsave("../<study_folder>/<prop_matching_results>.png", gg)
+```
+
+#### Export weights only
+```{r}
+write.csv(covid_pts, "../<study_folder>/<cohort_with_iptw_weights>.csv", row.names=FALSE)
+```
+
+#### Export best matched dataset
+```{r}
+#### Export results
+write.csv(covid_matched_g, "../<study_folder>/<matched_population>.csv", row.names=FALSE)
+```
+
+#### Export unmatched data
+```{r}
+#### Export results
+write.csv(covid_pts, "../<study_folder>/<unmatched_population>.csv", row.names=FALSE)
+```
+

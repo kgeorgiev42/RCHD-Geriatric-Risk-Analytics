@@ -1,0 +1,883 @@
+---
+title: "COVID-19 patient cohort extraction"
+output: html_notebook
+---
+#### Libraries and working directory
+
+```{r}
+library(tidyverse)
+library(knitr)
+library(lubridate)
+library(matrixStats)
+library(forecast)
+library(imputeTS)
+library(splines)
+library(patchwork)
+library(ggplot2)
+library(ggpubr)
+library(Metrics)
+library(gdata)
+```
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE)
+knitr::opts_knit$set(root.dir = "//<study_data_folder>")
+```
+
+```{r}
+sessionInfo()
+```
+#### Load data
+```{r}
+episodes <- read.csv("<..>.csv", stringsAsFactors = FALSE,header=TRUE,sep='\t',quote="",check.names=FALSE, na.strings=c("NA", "N/A", "", " "))
+labs <- read.csv("<..>.csv", stringsAsFactors = FALSE,header=TRUE,sep='\t',quote="",check.names=FALSE, na.strings=c("NA", "N/A", "", " "))
+aande <- read.csv("<..>.csv", stringsAsFactors = FALSE,header=TRUE,sep='\t',quote="",check.names=FALSE, na.strings=c("NA", "N/A", "", " "))
+contacts <- read.csv("<..>.csv", stringsAsFactors = FALSE,header=TRUE,sep='\t',quote="",check.names=FALSE, na.strings=c("NA", "N/A", "", " "))
+deaths <- read.csv("<..>.csv", stringsAsFactors = FALSE,header=TRUE,sep='\t',quote="",check.names=FALSE, na.strings=c("NA", "N/A", "", " "))
+trak_care <- read.csv("<..>.csv", stringsAsFactors = FALSE,header=TRUE,sep='\t',quote="",check.names=FALSE, na.strings=c("NA", "N/A", "", " "))
+trak_adm <- read.csv("<..>.csv", stringsAsFactors = FALSE,header=TRUE,sep='\t',quote="",check.names=FALSE, na.strings=c("NA", "N/A", "", " "))
+trak_disch <- read.csv("<..>.csv", stringsAsFactors = FALSE,header=TRUE,sep='\t',quote="",check.names=FALSE, na.strings=c("NA", "N/A", "", " "))
+smr_code <- read.csv("<..>.csv", stringsAsFactors = FALSE,header=TRUE,sep='\t',quote="",check.names=FALSE, na.strings=c("NA", "N/A", "", " "))
+```
+
+#### Select lab tests for positive and negative admissions
+```{r}
+#### Merge with TRAK
+trak_adm_ids <- unique(trak_adm$pid)
+lab_data <- labs %>%
+  select(c(pid, dataSource, collectionDate, testPositive))
+
+trak_adm_sel <- trak_adm %>%
+  select(c(pid, EpisodeNumber, AdmissionDate, AdmissionTime, AdmissionTypeCode, AdmissionStatus, AdmittingSpecialtyCode)) %>%
+  mutate(AdmissionDateTime = ymd_hm(paste(AdmissionDate, AdmissionTime)))
+
+trak_disch_sel <- trak_disch %>%
+  select(c(pid, EpisodeNumber, DischargeDate, DischargeTime, DischargeSpecialtyCode, EpisodeLoSDays, EpisodeLoSHours)) %>%
+  mutate(DischargeDateTime = ymd_hm(paste(DischargeDate, DischargeTime)))
+
+trak_full <- left_join(trak_adm_sel, trak_disch_sel, by=c('pid', 'EpisodeNumber'))
+trak_full <- trak_full %>%
+  select(c(pid, AdmissionDate, AdmissionDateTime, AdmissionStatus, AdmissionTypeCode, DischargeDate, DischargeDateTime, EpisodeLoSDays, AdmittingSpecialtyCode, DischargeSpecialtyCode, EpisodeNumber)) %>%
+  na.omit() %>%
+  filter(AdmissionStatus %in% c('D', 'A')) %>%
+  mutate(AdmissionDate = as.Date(AdmissionDate)) %>%
+  mutate(DischargeDate = as.Date(DischargeDate))
+```
+
+```{r}
+### Handle overlapping admissions
+trak_sel <- trak_full %>%
+  arrange(pid, AdmissionDate) %>%
+  group_by(pid) %>%
+  mutate(indx = c(0, cumsum(as.numeric(lead(AdmissionDate)) > 
+                              cummax(as.numeric(DischargeDate)))[-n()])) %>%
+  group_by(pid,indx) %>%
+  summarise(AdmissionDate=min(AdmissionDate), DischargeDate=max(DischargeDate), EpisodeLoSDays=sum(EpisodeLoSDays), AdmittingSpecialtyCode=first(AdmittingSpecialtyCode),
+            DischargeSpecialtyCode=last(DischargeSpecialtyCode), AdmissionDateTime=min(AdmissionDateTime), DischargeDateTime=max(DischargeDateTime), EpisodeNumber=first(EpisodeNumber), AdmissionTypeCode=first(AdmissionTypeCode)) %>%
+  select(-indx)
+
+head(trak_sel)
+dim(trak_sel)
+dim(trak_full)
+```
+```{r}
+#### Validate numbers
+table(trak_sel$AdmittingSpecialtyCode)
+dim(trak_sel[trak_sel$EpisodeLoSDays==0,])
+
+### Set elective/non-elective flag
+trak_sel <- trak_sel %>%
+  mutate(elective=ifelse(AdmissionTypeCode %in% c('EL', 'OP', 'R', 'WL'),1,0)) %>%
+  mutate(elective=ifelse(AdmissionTypeCode %in% c('NB', 'X'), -1, elective))
+
+### Check admission specialties
+table(trak_sel$elective)
+table(trak_sel$AdmittingSpecialtyCode)
+table(trak_sel[trak_sel$elective==0,]$AdmittingSpecialtyCode)
+```
+
+```{r}
+#### Use emergency admissions only
+trak_sel <- trak_sel %>%
+  filter(elective==0)
+dim(trak_sel)
+```
+
+```{r}
+### Merge with covid tests
+lab_data <- left_join(lab_data, trak_sel, by=c('pid'))
+lab_data <- lab_data[!is.na(lab_data$collectionDate),]
+```
+
+
+```{r}
+#### Filter positive tests
+lab_data$testPositive[is.na(lab_data$testPositive)] <- 'N'
+### Build positive intervals
+admissionInterval14 <- interval(lab_data$AdmissionDateTime - days(14), lab_data$DischargeDateTime)
+admissionInterval12 <- interval(lab_data$AdmissionDateTime - days(12), lab_data$DischargeDateTime)
+admissionInterval10 <- interval(lab_data$AdmissionDateTime - days(10), lab_data$DischargeDateTime)
+admissionInterval8 <- interval(lab_data$AdmissionDateTime - days(8), lab_data$DischargeDateTime)
+admissionInterval6 <- interval(lab_data$AdmissionDateTime - days(6), lab_data$DischargeDateTime)
+lab_data$collectionDate <- ymd_hms(lab_data$collectionDate)
+
+lab_data <- lab_data %>%
+  mutate(testPositive_14d = case_when((collectionDate %within% admissionInterval14) & (testPositive == 'Y') ~1, TRUE ~0)) %>%
+  mutate(testPositive_12d = case_when((collectionDate %within% admissionInterval12) & (testPositive == 'Y') ~1, TRUE ~0)) %>%
+  mutate(testPositive_10d = case_when((collectionDate %within% admissionInterval10) & (testPositive == 'Y') ~1, TRUE ~0)) %>%
+  mutate(testPositive_8d = case_when((collectionDate %within% admissionInterval8) & (testPositive == 'Y') ~1, TRUE ~0)) %>%
+  mutate(testPositive_6d = case_when((collectionDate %within% admissionInterval6) & (testPositive == 'Y') ~1, TRUE ~0))
+```
+
+```{r}
+### Filter 10d lab tests
+lab_sel <- lab_data %>%
+  filter(!((dataSource == 'Test by Lighthouse Laboratory') & (testPositive_10d == 0))) %>%
+  select(c(pid, dataSource, collectionDate, testPositive_10d, EpisodeNumber, AdmissionDate, AdmittingSpecialtyCode, AdmissionDateTime, DischargeDate, DischargeSpecialtyCode, DischargeDateTime, EpisodeLoSDays)) %>%
+  arrange(pid, AdmissionDateTime, desc(testPositive_10d)) %>%
+  group_by(pid) %>%
+  slice(1) %>%
+  ungroup()
+```
+
+```{r}
+table(lab_sel$testPositive_10d)
+```
+
+
+```{r}
+#### Aggregate trak care data
+trak_care_sel <- trak_care %>% drop_na(c(dateCreated, timeCreated))
+trak_care_sel$datetime <- ymd_hm(paste(trak_care_sel$dateCreated, trak_care_sel$timeCreated))
+
+trak_care_sel <- trak_care_sel %>%
+  select(-pid) %>%
+  rename_with(~paste0('tc_', .x)) %>%
+  mutate(pid=trak_care_sel$pid) %>%
+  relocate(pid) %>%
+  select(-c('tc_dateCreated', 'tc_timeCreated'))
+
+### Build flags for OT, PT input
+trak_care_sel %>% group_by(tc_careProvider) %>% summarise(n=n()) %>% arrange(desc(n))
+
+trak_care_sel <- trak_care_sel %>%
+  select(pid)
+
+trak_agg <- arrange(aggregate(EpisodeLoSDays ~ pid, data=lab_data, FUN=median, na.rm=TRUE), pid)
+trak_agg_total <- aggregate(EpisodeLoSDays ~ pid, data=lab_data, FUN=sum, na.rm=TRUE)
+trak_agg_total <- trak_agg_total %>%
+  rename(Total_EpisodeLoSDays = EpisodeLoSDays)
+
+trak_agg <- trak_agg %>%
+  rename(Median_EpisodeLoSDays = EpisodeLoSDays)
+
+### Get last discharge date and attach
+trak_ddate <- trak_disch %>%
+  group_by(pid) %>%
+  slice(which.max(as.Date(DischargeDate, '%Y-%m-%d'))) %>%
+  select(c(pid, DischargeDate))
+
+### Get discharge specialties
+lab_disch_spec <- lab_sel %>%
+  mutate(spec_general_medicine=ifelse(DischargeSpecialtyCode %in% c('GM', 'GMWNT'), 1, 0)) %>%
+  mutate(spec_respiratory_medicine=ifelse(DischargeSpecialtyCode %in% c('RESP', 'RESPCSNT', 'RESPFGEBNT', 'RESPPXARNT', 'RESPWANT'), 1, 0)) %>%
+  mutate(spec_geriatric_medicine=ifelse(DischargeSpecialtyCode %in% c('GA', 'GORU', 'RESPITE'), 1, 0)) %>%
+  select(c(pid, EpisodeNumber, spec_general_medicine, spec_respiratory_medicine, spec_geriatric_medicine)) %>%
+  arrange(pid, EpisodeNumber, desc(spec_general_medicine), desc(spec_respiratory_medicine), desc(spec_geriatric_medicine)) %>%
+  group_by(pid) %>%
+  slice(1)
+
+trak_agg_full <- left_join(trak_agg, trak_ddate, by='pid')
+trak_agg_full <- left_join(trak_agg_full, trak_agg_total, by='pid')
+
+trak_agg_full <- trak_agg_full %>%
+  mutate(across(c(Total_EpisodeLoSDays, Median_EpisodeLoSDays), round, 3)) %>%
+  rename(LastDischargeDate = DischargeDate)
+
+### Join with pt set
+lab_sel <- left_join(lab_sel, trak_agg_full, by='pid')
+lab_sel <- left_join(lab_sel, lab_disch_spec, by=c('pid', 'EpisodeNumber'))
+lab_sel$spec_geriatric_medicine <- lab_sel$spec_geriatric_medicine %>% replace_na(0)
+lab_sel$spec_general_medicine <- lab_sel$spec_general_medicine %>% replace_na(0)
+lab_sel$spec_respiratory_medicine <- lab_sel$spec_respiratory_medicine %>% replace_na(0)
+lab_sel <- lab_sel[!is.na(lab_sel$EpisodeNumber),]
+
+head(lab_sel)
+```
+
+```{r}
+#### Merge with SPINE set of pts
+trak_pt_ids <- unique(lab_sel$pid)
+ep_cols <- c('pid', 'sex', 'simd2020Vigintile', 'simd2020Quintile', 'healthBoard', 
+             'ageAtFirstTest', 'dateOfFirstTest', 'wasFirstTestPositive',
+             'dateOfFirstPositiveTest', 'numberOfTests', 'numberOfPositiveTests',
+             'anyPositiveTest')
+
+ep_sel <- episodes %>% 
+  select(ep_cols) %>%
+  filter((ageAtFirstTest >= 18) & (pid %in% trak_pt_ids)) %>%
+  select(-anyPositiveTest)
+
+lab_full <- left_join(ep_sel, lab_sel, by='pid')
+head(lab_full)
+dim(lab_full)
+```
+
+#### Append Death data
+```{r}
+death_sel <- deaths %>%
+  select(c('pid', 'Date of Death')) %>%
+  rename_with(~ tolower(gsub(' ', '_', .x, fixed=TRUE)))
+
+lab_full <- left_join(lab_full, death_sel, 'pid')
+### Died during stay flag
+lab_full <- lab_full %>%
+  mutate(died_during_stay = ifelse(as.Date(LastDischargeDate, '%Y-%m-%d') >= 
+                                     as.Date(date_of_death, '%Y-%m-%d'), 1, 0)) %>%
+  mutate(died_during_stay = ifelse(is.na(died_during_stay), 0, died_during_stay)) %>%
+  filter(died_during_stay == 0)
+
+head(lab_full)
+dim(lab_full)
+```
+
+#### Build flags for comorbidities
+```{r}
+smr_code$EventDate <- as.Date(smr_code$EventDate[!is.na(smr_code$EventDate)])
+smr_code <- left_join(smr_code, lab_full[, c('pid', 'AdmissionDate')], by='pid')
+
+smr_sel <- smr_code %>%
+  filter(!is.na(AdmissionDate)) %>%
+  filter(EventDate < AdmissionDate) %>%
+  select(c(pid, PhenotypeName))
+
+smr_sel$PhenotypeName <- gsub(",", "", as.character(smr_sel$PhenotypeName))
+
+smr_cms <- within(smr_sel, {PhenotypeName <- as.character(PhenotypeName);
+       Comorbidities <- ave(PhenotypeName, pid, FUN=toString)})
+
+smr_cms <- smr_cms %>%
+  select(c(pid, Comorbidities)) %>%
+  group_by(pid) %>%
+  slice(1)
+
+lab_full <- left_join(lab_full, smr_cms, by='pid')
+
+lab_full <- lab_full %>%
+  mutate(n_morbid=str_split(Comorbidities, ',') %>% lengths) %>%
+  mutate(n_morbid=ifelse(is.na(Comorbidities), 0, n_morbid)) %>%
+  mutate(is_multimorbid=ifelse(n_morbid > 1, 1, 0)) %>%
+  mutate(is_complex_multimorbid=ifelse(n_morbid > 3, 1, 0)) %>%
+  mutate(cm_chd = ifelse(grepl('Coronary heart disease not otherwise specified', Comorbidities, fixed=TRUE), 1, 0)) %>%
+  mutate(cm_stable_angina = ifelse(grepl('Stable angina', Comorbidities, fixed=TRUE), 1, 0)) %>%
+  mutate(cm_unstable_angina = ifelse(grepl('Unstable Angina', Comorbidities, fixed=TRUE), 1, 0)) %>%
+  mutate(cm_heart_failure = ifelse(grepl('Heart failure', Comorbidities, fixed=TRUE), 1, 0)) %>%
+  mutate(cm_ic_haem = ifelse(grepl('Intracerebral haemorrhage', Comorbidities, fixed=TRUE), 1, 0)) %>%
+  mutate(cm_ischaemic_stroke = ifelse(grepl('Ischaemic stroke', Comorbidities, fixed=TRUE), 1, 0)) %>%
+  mutate(cm_stroke_nos = ifelse(grepl('Stroke NOS', Comorbidities, fixed=TRUE), 1, 0)) %>%
+  mutate(cm_mi = ifelse(grepl('Myocardial infarction', Comorbidities, fixed=TRUE), 1, 0)) %>%
+  mutate(cm_diabetes = ifelse(grepl('Diabetes', Comorbidities, fixed=TRUE), 1, 0)) %>%
+  mutate(cm_obesity = ifelse(grepl('Obesity', Comorbidities, fixed=TRUE), 1, 0)) %>%
+  mutate(cm_esrd = ifelse(grepl('End stage renal disease', Comorbidities, fixed=TRUE), 1, 0)) %>%
+  mutate(cm_urinary_incontinence = ifelse(grepl('Urinary Incontinence', Comorbidities, fixed=TRUE), 1, 0)) %>%
+  mutate(cm_hip_fracture = ifelse(grepl('Fracture of hip', Comorbidities, fixed=TRUE), 1, 0)) %>%
+  mutate(cm_osteoporosis = ifelse(grepl('Osteoporosis', Comorbidities, fixed=TRUE), 1, 0)) %>%
+  mutate(cm_parkinsons = ifelse(grepl('Parkinson\'s disease', Comorbidities, fixed=TRUE), 1, 0)) %>%
+  mutate(cm_dementia = ifelse(grepl('Dementia', Comorbidities, fixed=TRUE), 1, 0)) %>%
+  mutate(cm_delirium = ifelse(grepl('Delirium not induced by alcohol and other psychoactive substances', Comorbidities, fixed=TRUE), 1, 0)) %>%
+  mutate(cm_depression = ifelse(grepl('Depression', Comorbidities, fixed=TRUE), 1, 0)) %>%
+  mutate(cm_asthma = ifelse(grepl('Asthma', Comorbidities, fixed=TRUE), 1, 0)) %>%
+  mutate(cm_copd = ifelse(grepl('Chronic Obstructive Pulmonary Disease (COPD)', Comorbidities, fixed=TRUE), 1, 0)) %>%
+  mutate(cm_stroke_any = ifelse((cm_stroke_nos==0) & (cm_ischaemic_stroke==0), 0, 1))
+```
+
+```{r}
+for (phenotype in colnames(lab_full %>% dplyr::select(starts_with('cm_'))))
+{
+  print('------')
+  print(phenotype)
+  print(table(lab_full[phenotype]))
+}
+```
+#### Build 6-month post-discharge outcomes for some of the more prevalent comorbidities
+```{r}
+smr_pd <- left_join(smr_code, lab_full[, c('pid', 'LastDischargeDate')], by='pid')
+
+smr_pd$EventDate <- ymd(smr_pd$EventDate)
+smr_pd$LastDischargeDate <- ymd(smr_pd$LastDischargeDate)
+cm_interval <- interval(smr_pd$LastDischargeDate, smr_pd$LastDischargeDate + months(6))
+
+smr_sel <- smr_pd %>%
+  mutate(outcome_6m = case_when(EventDate %within% cm_interval ~1,
+                                          TRUE ~0)) %>%
+  filter(outcome_6m == 1) %>%
+  select(c(pid, PhenotypeName))
+
+smr_sel$PhenotypeName <- gsub(",", "", as.character(smr_sel$PhenotypeName))
+
+smr_cms <- within(smr_sel, {PhenotypeName <- as.character(PhenotypeName);
+       cm_6m_outcomes <- ave(PhenotypeName, pid, FUN=toString)})
+
+smr_cms <- smr_cms %>%
+  select(c(pid, cm_6m_outcomes)) %>%
+  group_by(pid) %>%
+  slice(1)
+
+lab_full <- left_join(lab_full, smr_cms, by='pid')
+
+lab_full <- lab_full %>%
+  mutate(cm_chd_6m = ifelse(grepl('Coronary heart disease not otherwise specified', cm_6m_outcomes, fixed=TRUE), 1, 0)) %>%
+  mutate(cm_ischaemic_stroke_6m = ifelse(grepl('Ischaemic stroke', cm_6m_outcomes, fixed=TRUE), 1, 0)) %>%
+  mutate(cm_diabetes_6m = ifelse(grepl('Diabetes', cm_6m_outcomes, fixed=TRUE), 1, 0)) %>%
+  mutate(cm_dementia_6m = ifelse(grepl('Dementia', cm_6m_outcomes, fixed=TRUE), 1, 0)) %>%
+  mutate(cm_delirium_6m = ifelse(grepl('Delirium not induced by alcohol and other psychoactive substances', cm_6m_outcomes, fixed=TRUE), 1, 0)) %>%
+  mutate(cm_copd_6m = ifelse(grepl('Chronic Obstructive Pulmonary Disease (COPD)', cm_6m_outcomes, fixed=TRUE), 1, 0))
+
+```
+```{r}
+for (phenotype in colnames(lab_full %>% dplyr::select(starts_with('cm_') & ends_with('6m'))))
+{
+  print('------')
+  print(phenotype)
+  print(table(lab_full[phenotype]))
+}
+```
+
+
+#### Build 1yr mortality after index admission
+```{r}
+lab_full$AdmissionDateTime <- lab_full$AdmissionDateTime[!is.na(lab_full$AdmissionDateTime)]
+lab_full$DischargeDateTime <- lab_full$DischargeDateTime[!is.na(lab_full$DischargeDateTime)]
+lab_full$AdmissionDate <- as.Date(lab_full$AdmissionDate[!is.na(lab_full$AdmissionDate)])
+lab_full$DischargeDate <- as.Date(lab_full$DischargeDate[!is.na(lab_full$DischargeDate)])
+
+mortality_interval <- interval(lab_full$AdmissionDate, lab_full$AdmissionDate + days(365))
+lab_full$date_of_death <- as.Date(ymd(lab_full$date_of_death))
+
+lab_full <- lab_full %>%
+  mutate(mortality_1yr=case_when(date_of_death %within% mortality_interval ~1,
+                                          TRUE ~0))
+
+```
+```{r}
+length(lab_full$date_of_death)
+length(mortality_interval)
+table(lab_full$mortality_1yr)
+```
+```{r}
+sum(is.na(trak_care$specialty))
+sum(is.na(trak_care$careProvider))
+```
+
+#### Validate contacts data
+
+```{r}
+interventions <- c('Interventions - Dietetics', 'Interventions - Occupational Therapy',
+                   'Interventions - Physiotherapy', 'Interventions - Speech and Language Therapy')
+
+lab_ids <- unique(lab_full$pid)
+trak_pw_test <- trak_care %>%
+  filter(pid %in% lab_ids) %>%
+  mutate(pt_input=ifelse(str_detect(careProvider, 'Physiotherap'), 1, 0)) %>%
+  mutate(ot_input=ifelse(str_detect(careProvider, 'Occupational'), 1, 0)) %>%
+  mutate(slt_input=ifelse(str_detect(careProvider, 'Speech and Language'), 1, 0)) %>%
+  mutate(diet_input=ifelse(str_detect(careProvider, 'Diet'), 1, 0)) %>%
+  filter((pt_input == 1) | (ot_input == 1) | (slt_input == 1) | (diet_input == 1)) %>%
+  mutate(cdt = ymd(dateCreated)) %>%
+  mutate(type = 'Inpatient') %>%
+  mutate(intervention=case_when(pt_input == 1 ~ 'Physiotherapy', ot_input==1~'Occupational Therapy',
+                                    slt_input == 1 ~ 'Speech and Language Therapy', diet_input == 1~'Dietetics', TRUE~'Undefined')) %>%
+  select(c(pid, cdt, type)) %>%
+  distinct()
+
+trak_ahp_test <- contacts %>%
+  filter(pid %in% lab_ids) %>%
+  mutate(cdt = ymd(ContactDate)) %>%
+  mutate(EpisodeSubType = ifelse((EpisodeSubType == 'Daycase'), 'Inpatient', EpisodeSubType)) %>%
+  mutate(EpisodeSubType = ifelse((EpisodeSubType == 'Daycase'), 'Community', EpisodeSubType)) %>%
+  filter(EpisodeSubType %in% c('Community', 'Inpatient')) %>%
+  filter(InterventionCategory1 %in% interventions) %>%
+  mutate(InterventionCategory1 = str_trim(sub(".*Interventions - ", "", InterventionCategory1))) %>%
+  rename(type = EpisodeSubType) %>%
+  rename(intervention = InterventionCategory1) %>%
+  select(c(pid, cdt, type)) %>%
+  distinct()
+
+dim(trak_pw_test)
+dim(trak_ahp_test)
+dim(union(trak_pw_test, trak_ahp_test))
+dim(intersect(trak_pw_test, trak_ahp_test))
+table(union(trak_pw_test, trak_ahp_test)$type)
+table(intersect(trak_pw_test, trak_ahp_test)$type)
+```
+
+```{r}
+#### Merge the tables
+pw_inter <- intersect(trak_pw_test, trak_ahp_test)
+pw_inter <- pw_inter %>%
+  drop_na() %>%
+  mutate(pr_key = paste(pid, '-', cdt, '-', type))
+
+trak_pw_test <- trak_pw_test %>%
+  drop_na() %>%
+  mutate(pr_key = paste(pid, '-', cdt, '-', type))
+
+trak_ahp_test <- trak_ahp_test %>%
+  drop_na() %>%
+  mutate(pr_key = paste(pid, '-', cdt, '-', type))
+
+trak_pw_all <- union(trak_pw_test, trak_ahp_test)
+ahp_ids <- unique(trak_ahp_test$pr_key)
+trakpw_ids <- unique(trak_pw_test$pr_key)
+inter_ids <- unique(pw_inter$pr_key)
+```
+
+```{r}
+### Get basic rehab data
+trak_pw_all <- trak_pw_all %>%
+  mutate(source = case_when((pr_key %in% inter_ids) ~ 'BOTH', (pr_key %in% trakpw_ids) ~ 'PW_TRAK',
+         (pr_key %in% ahp_ids) ~ 'PW_AHP', TRUE~'Undefined'))
+
+trak_ahp <- contacts %>%
+  filter(pid %in% lab_ids) %>%
+  mutate(cdt = ymd(ContactDate)) %>%
+  mutate(cduration_ahp = ContactDuration) %>%
+  mutate(EpisodeSubType = ifelse((EpisodeSubType == 'Daycase'), 'Inpatient', EpisodeSubType)) %>%
+  mutate(EpisodeSubType = ifelse((EpisodeSubType == 'Daycase'), 'Community', EpisodeSubType)) %>%
+  filter(EpisodeSubType %in% c('Community', 'Inpatient')) %>%
+  filter(InterventionCategory1 %in% interventions) %>%
+  mutate(InterventionCategory1 = str_trim(sub(".*Interventions - ", "", InterventionCategory1))) %>%
+  rename(type = EpisodeSubType) %>%
+  rename(cintervention_ahp = InterventionCategory1) %>%
+  rename(ctime_ahp = ContactTime) %>%
+  select(c(pid, cdt, type, ctime_ahp, cduration_ahp, cintervention_ahp, ContactMode, Intervention1, MainReasonActivity, AHPProfession, PatientLocationCategory)) %>%
+  rename(contact_mode=ContactMode) %>%
+  rename(intervention_details=Intervention1) %>%
+  rename(activity=MainReasonActivity) %>%
+  rename(specialist=AHPProfession) %>%
+  rename(location_type=PatientLocationCategory) %>%
+  drop_na() %>%
+  mutate(pr_key = paste(pid, '-', cdt, '-', type)) %>%
+  distinct(pr_key, .keep_all = TRUE)
+
+trak_pw <- trak_care %>%
+  filter(pid %in% lab_ids) %>%
+  mutate(pt_input=ifelse(str_detect(careProvider, 'Physiotherap'), 1, 0)) %>%
+  mutate(ot_input=ifelse(str_detect(careProvider, 'Occupational'), 1, 0)) %>%
+  mutate(slt_input=ifelse(str_detect(careProvider, 'Speech and Language'), 1, 0)) %>%
+  mutate(diet_input=ifelse(str_detect(careProvider, 'Diet'), 1, 0)) %>%
+  filter((pt_input == 1) | (ot_input == 1) | (slt_input == 1) | (diet_input == 1)) %>%
+  mutate(cdt = ymd(dateCreated)) %>%
+  mutate(type = 'Inpatient') %>%
+  mutate(cintervention_pw=case_when(pt_input == 1 ~ 'Physiotherapy', ot_input==1~'Occupational Therapy',
+                                    slt_input == 1 ~ 'Speech and Language Therapy', diet_input == 1~'Dietetics', TRUE~'Undefined')) %>%
+  
+  mutate(ctime_pw = timeCreated) %>%
+  mutate(activity_pw = case_when(cintervention_pw=='Physiotherapy'~'Physiotherapy interventions', 
+                              cintervention_pw=='Occupational Therapy'~'Occupational therapy intervention',
+                              cintervention_pw=='Speech and Language Therapy'~'Speech and Language Therapy intervention',
+                              cintervention_pw=='Dietetics'~'Dietetic intervention', TRUE~'Undefined intervention')) %>%
+  mutate(specialist_pw = case_when(cintervention_pw=='Physiotherapy'~'Physiotherapists', 
+                              cintervention_pw=='Occupational Therapy'~'Occupational Therapists',
+                              cintervention_pw=='Speech and Language Therapy'~'Speech and Language Therapists',
+                              cintervention_pw=='Dietetics'~'Dieticians', TRUE~'Other')) %>%
+  mutate(contact_mode_pw = 'Face to Face') %>%
+  mutate(intervention_details_pw = 'No information') %>%
+  mutate(location_type_pw = 'Wards / OPDs') %>%
+  select(c(pid, cdt, type, ctime_pw, cintervention_pw, intervention_details_pw, activity_pw, contact_mode_pw,
+           specialist_pw, location_type_pw)) %>%
+  drop_na() %>%
+  mutate(cduration_pw = NA) %>%
+  mutate(pr_key = paste(pid, '-', cdt, '-', type)) %>%
+  distinct(pr_key, .keep_all = TRUE)
+
+trak_pw_all <- left_join(trak_pw_all, trak_ahp, by=c('pid', 'cdt', 'type', 'pr_key'))
+trak_pw_all <- left_join(trak_pw_all, trak_pw, by=c('pid', 'cdt', 'type', 'pr_key'))
+```
+
+```{r}
+trak_pw_all <- trak_pw_all %>%
+  mutate(ctime_ahp = ifelse(is.na(ctime_ahp), '23:59', ctime_ahp)) %>%
+  mutate(ctime_pw = ifelse(is.na(ctime_pw), '23:59', ctime_pw)) %>%
+  rowwise() %>%
+  mutate(ctime = min(ctime_ahp,ctime_pw)) %>%
+  mutate(cintervention = case_when((ctime_pw < ctime_ahp)&(!is.na(cintervention_pw)) ~ cintervention_pw,
+                                   (ctime_ahp < ctime_pw)&(!is.na(cintervention_ahp)) ~ cintervention_ahp,
+                                   (is.na(cintervention_ahp))&(!is.na(cintervention_pw)) ~ cintervention_pw,
+                                   (is.na(cintervention_pw))&(!is.na(cintervention_ahp)) ~ cintervention_ahp)) %>%
+  ungroup() %>%
+  mutate(cintervention = ifelse((is.na(cintervention))&(!is.na(cintervention_ahp)), cintervention_ahp, cintervention)) %>%
+  mutate(cintervention = ifelse((is.na(cintervention))&(!is.na(cintervention_pw)), cintervention_pw, cintervention)) %>%
+  filter(!is.na(cintervention)) %>%
+  mutate(cduration = cduration_ahp) %>%
+  mutate(intervention_details = ifelse(is.na(intervention_details), 'No information', intervention_details)) %>%
+  mutate(contact_mode = ifelse(is.na(contact_mode), 'Face to Face', contact_mode)) %>%
+  mutate(activity = ifelse(is.na(activity), case_when(cintervention=='Physiotherapy'~'Physiotherapy interventions',cintervention=='Occupational Therapy'~'Occupational therapy intervention',cintervention=='Speech and Language Therapy'~'Speech and Language Therapy intervention',cintervention=='Dietetics'~'Dietetic intervention', TRUE~'Undefined intervention'), activity)) %>%
+  mutate(specialist = case_when(cintervention=='Physiotherapy'~'Physiotherapists', 
+                              cintervention=='Occupational Therapy'~'Occupational Therapists',
+                              cintervention=='Speech and Language Therapy'~'Speech and Language Therapists',
+                              cintervention=='Dietetics'~'Dieticians', TRUE~'Other')) %>%
+  mutate(location_type = ifelse(is.na(location_type), 'Wards / OPDs', location_type)) %>%
+  select(c(pid, cdt, type, source, ctime, cduration, cintervention, activity, contact_mode, intervention_details, activity, specialist, location_type)) %>%
+  mutate(cdtt = ymd_hm(paste(cdt, ctime)))
+```
+```{r}
+table(trak_pw_all$cintervention)
+table(trak_pw_all$source)
+dim(trak_pw_all)
+sapply(trak_pw_all, function(y) sum(length(which(is.na(y)))))
+```
+
+```{r}
+ggplot(trak_pw_all[is.na(trak_pw_all$cduration),], aes(x=cdt, y=..density..)) + geom_histogram(bins=100)
+```
+```{r}
+#### Impute missing durations
+trak_pw_all <- trak_pw_all %>%
+  arrange(pid, cdt)
+trak_pw_imp_km <- na_kalman(trak_pw_all$cduration, model='StructTS')
+ggplot_na_imputations(trak_pw_all$cduration, trak_pw_imp_km)
+trak_pw_all$cduration_kalman <- round(trak_pw_imp_km)
+
+trak_pw_imp_m <- na_mean(trak_pw_all$cduration)
+ggplot_na_imputations(trak_pw_all$cduration, trak_pw_imp_m)
+trak_pw_all$cduration_mean <- round(trak_pw_imp_m)
+
+trak_pw_imp_ma <- na_ma(trak_pw_all$cduration, weighting='exponential')
+ggplot_na_imputations(trak_pw_all$cduration, trak_pw_imp_ma)
+trak_pw_all$cduration_mea <- round(trak_pw_imp_ma)
+
+trak_pw_imp_md <- na_mean(trak_pw_all$cduration, option='median')
+trak_pw_all$cduration_median <- round(trak_pw_imp_md)
+trak_pw_imp_locf <- na_locf(trak_pw_all$cduration)
+trak_pw_all$cduration_locf <- round(trak_pw_imp_locf)
+trak_pw_imp_inter <- na_interpolation(trak_pw_all$cduration)
+trak_pw_all$cduration_inter <- round(trak_pw_imp_inter)
+```
+```{r}
+statsNA(trak_pw_all$cduration)
+```
+
+```{r}
+#### Original
+p <- ggplot(data=trak_pw_all, aes(x=cdt, y=cduration)) + geom_point()
+
+p <- p + geom_smooth(aes(y=cduration), method='lm', formula=y~ns(x), se=FALSE)
+p
+ggplot(trak_pw_all, aes(x=cduration)) + geom_histogram(bins=100)
+
+#### Kalman
+p_s <- ggplot(data=trak_pw_all, aes(x=cdt, y=cduration_kalman)) + geom_point()
+
+p_s <- p_s + geom_smooth(aes(y=cduration_kalman), method='lm', formula=y~ns(x), se=FALSE)
+p_s
+ggplot(trak_pw_all, aes(x=cduration_kalman)) + geom_histogram(bins=100)
+
+#### EMA
+p_e <- ggplot(data=trak_pw_all, aes(x=cdt, y=cduration_mea)) + geom_point()
+p_e <- p_e + geom_smooth(aes(y=cduration_mea), method='lm', formula=y~ns(x), se=FALSE)
+p_e
+ggplot(trak_pw_all, aes(x=cduration_mea)) + geom_histogram(bins=100)
+```
+
+
+```{r}
+### Round-up MEA
+round_up <- function(x,m) m*ceiling(x/m)
+round_down <- function(x,m) m*floor(x/m)
+trak_pw_all$cduration_rmeaup <- round_up(trak_pw_all$cduration_mea, 5)
+trak_pw_all$cduration_rmeadown <- round_down(trak_pw_all$cduration_mea, 5)
+```
+
+```{r}
+p_r <- ggdensity(trak_pw_all, x='cduration', color='gray', fill='gray', xlab='Duration (original)') + xlim(0, 100) + ylim(0, 0.2)
+p_med <- ggdensity(trak_pw_all, x='cduration_median', color='violet', fill='violet', xlab='Median') + xlim(0, 100) + ylim(0, 0.3)
+p_inter <- ggdensity(trak_pw_all, x='cduration_inter', color='orange', fill='orange', xlab='Interpolated') + xlim(0, 100) + ylim(0, 0.2)
+p_locf <- ggdensity(trak_pw_all, x='cduration_locf', color='pink', fill='pink', xlab='LOCF') + xlim(0, 100) + ylim(0, 0.2)
+p_k <- ggdensity(trak_pw_all, x='cduration_kalman', color='red', fill='red', xlab='Kalman') + xlim(0, 100) + ylim(0, 0.2)
+p_m <- ggdensity(trak_pw_all, x='cduration_mean', color='green', fill='green', xlab='Mean') + xlim(0, 100) + ylim(0, 0.4)
+p_ema <- ggdensity(trak_pw_all, x='cduration_mea', color='blue', fill='blue', xlab='MWEA') + xlim(0, 100) + ylim(0, 0.2)
+p_rema_u <- ggdensity(trak_pw_all, x='cduration_rmeaup', color='darkolivegreen', fill='darkolivegreen', xlab='RUP:MWEA') + xlim(0, 100) + ylim(0, 0.2)
+p_rema_d <- ggdensity(trak_pw_all, x='cduration_rmeadown', color='darkcyan', fill='darkcyan', xlab='RDOWN:MWEA') + xlim(0, 100) + ylim(0, 0.2)
+gg <- ggarrange(p_r, p_m, p_med, p_k, p_ema, p_rema_u, p_rema_d, p_inter, p_locf, nrow=3, ncol=3, common.legend=TRUE, legend='top')
+annotate_figure(gg, top=text_grob('Density distributions of total rehabilitation time using various data imputation techniques', face='bold', size=12))
+ggsave('//<output_folder>/<plot_file>.png', bg='white')
+```
+
+#### Evaluate methods
+```{r}
+set.seed(42)
+trak_pw_na <- trak_pw_all %>%
+  filter(!is.na(cduration))
+
+train_ind <- sample(seq_len(nrow(trak_pw_na)), size=floor(0.661 * nrow(trak_pw_na)))
+train_gt <- trak_pw_na[-train_ind,]$cduration
+trak_pw_na[-train_ind, ]$cduration <- NA
+perf_df <- data.frame(matrix(ncol=3, nrow=0))
+
+## Mean
+train_imp_mean <- na_mean(trak_pw_na$cduration)
+rmse_mean <- round(rmse(train_gt, train_imp_mean), 4)
+mae_mean <- round(mae(train_gt, train_imp_mean), 4)
+perf_df <- rbind(perf_df, c('Mean', rmse_mean, mae_mean))
+
+## Median
+train_imp_med <- na_mean(trak_pw_na$cduration, option='median')
+rmse_med <- round(rmse(train_gt, train_imp_med), 4)
+mae_med <- round(mae(train_gt, train_imp_med), 4)
+perf_df <- rbind(perf_df, c('Median', rmse_med, mae_med))
+
+## Random
+train_imp_rand <- na_random(trak_pw_na$cduration)
+rmse_rand <- round(rmse(train_gt, train_imp_rand), 4)
+mae_rand <- round(mae(train_gt, train_imp_rand), 4)
+perf_df <- rbind(perf_df, c('Random', rmse_rand, mae_rand))
+
+## EWMA
+train_imp_ma <- na_ma(trak_pw_na$cduration, weighting='exponential')
+rmse_ma <- round(rmse(train_gt, train_imp_ma), 4)
+mae_ma <- round(mae(train_gt, train_imp_ma), 4)
+perf_df <- rbind(perf_df, c('Exponential WMA', rmse_ma, mae_ma))
+
+## RDOWN:EWMA
+rdma <- round_down(train_imp_ma, 5)
+rmse_rdma <- round(rmse(train_gt, rdma), 4)
+mae_rdma <- round(mae(train_gt, rdma), 4)
+perf_df <- rbind(perf_df, c('Rounded-down Exponential WMA (base 5)', rmse_rdma, mae_rdma))
+
+## RUP:EWMA
+ruma <- round_up(train_imp_ma, 5)
+rmse_ruma <- round(rmse(train_gt, ruma), 4)
+mae_ruma <- round(mae(train_gt, ruma), 4)
+perf_df <- rbind(perf_df, c('Rounded-up Exponential WMA (base 5)', rmse_ruma, mae_ruma))
+
+## LOCF
+train_imp_locf <- na_locf(trak_pw_na$cduration)
+rmse_locf <- round(rmse(train_gt, train_imp_locf), 4)
+mae_locf <- round(mae(train_gt, train_imp_locf), 4)
+perf_df <- rbind(perf_df, c('LOCF', rmse_locf, mae_locf))
+
+## Kalman smoothing
+train_imp_kalman <- na_kalman(trak_pw_na$cduration, model='StructTS')
+rmse_kalman <- round(rmse(train_gt, train_imp_kalman), 4)
+mae_kalman <- round(mae(train_gt, train_imp_kalman), 4)
+perf_df <- rbind(perf_df, c('Kalman smoothing', rmse_kalman, mae_kalman))
+
+## Linear interpolation
+train_imp_inter <- na_interpolation(trak_pw_na$cduration)
+rmse_inter <- round(rmse(train_gt, train_imp_inter), 4)
+mae_inter <- round(mae(train_gt, train_imp_inter), 4)
+perf_df <- rbind(perf_df, c('Linear interpolation', rmse_inter, mae_inter))
+
+colnames(perf_df) <- c('Method', 'RMSE', 'MAE')
+perf_df
+```
+```{r}
+#### Export best results
+write.csv(trak_pw_all, "//<output_folder>/<imputed_contacts_file>.csv", row.names=FALSE)
+```
+
+#### Generate contact features
+
+```{r}
+trak_pw_all <- read.csv("//<output_folder>/<imputed_contacts_file>.csv")
+```
+
+```{r}
+### Merge trak contacts
+lab_contacts <- left_join(lab_full[, c('pid', 'AdmissionDate', 'DischargeDate')], trak_pw_all, by=c('pid'))
+lab_contacts$AdmissionDate <- lubridate::ymd(lab_contacts$AdmissionDate)
+lab_contacts$DischargeDate <- lubridate::ymd(lab_contacts$DischargeDate)
+lab_contacts$cdt <- lubridate::ymd(lab_contacts$cdt)
+lab_contacts <- lab_contacts %>%
+  filter((AdmissionDate < cdt) & (DischargeDate >= cdt)) %>%
+  # Out-of-hours contacts are set after 7PM and before 7AM
+  mutate(out_of_hours = ifelse((hm(as.character(ctime)) > hm('19:00')) | (hm(as.character(ctime)) < hm('07:00')), 1, 0)) %>%
+  filter(type=='Inpatient')
+
+table(lab_contacts$type)
+```
+
+```{r}
+### Create trak pathway rehab features
+interv_sel <- lab_contacts %>%
+  arrange(pid, cdt) %>%
+  mutate(time_to_therapy = as.numeric(difftime(cdt, AdmissionDate, units=c('days'))))
+
+first_interv <- interv_sel %>%
+  arrange(pid, AdmissionDate) %>%
+  select(c(pid, time_to_therapy)) %>%
+  group_by(pid) %>%
+  slice(1)
+
+second_interv <- interv_sel %>%
+  arrange(pid, AdmissionDate) %>%
+  select(c(pid, time_to_therapy)) %>%
+  group_by(pid) %>%
+  rename(time_to_therapy_2=time_to_therapy) %>%
+  slice(2)
+
+first_type <- interv_sel %>%
+  arrange(pid, AdmissionDate) %>%
+  select(c(pid, type)) %>%
+  group_by(pid) %>%
+  slice(1)
+
+second_type <- interv_sel %>%
+  arrange(pid, AdmissionDate) %>%
+  select(c(pid, type)) %>%
+  group_by(pid) %>%
+  rename(type_2=type) %>%
+  slice(2)
+
+first_interv_name <- interv_sel %>%
+  arrange(pid, AdmissionDate) %>%
+  select(c(pid, cintervention)) %>%
+  group_by(pid) %>%
+  slice(1)
+
+second_interv_name <- interv_sel %>%
+  arrange(pid, AdmissionDate) %>%
+  select(c(pid, cintervention)) %>%
+  group_by(pid) %>%
+  rename(cintervention_2=cintervention) %>%
+  slice(2)
+
+n_contact_count <- interv_sel %>%
+  select(pid) %>%
+  group_by(pid) %>%
+  summarise(total_count_rehab = n())
+
+n_ooh_contact_count <- interv_sel %>%
+  filter(out_of_hours==1) %>%
+  select(pid) %>%
+  group_by(pid) %>%
+  summarise(total_count_ooh_rehab = n())
+
+n_contact_minutes <- interv_sel %>%
+  select(c(pid, cduration_rmeadown)) %>%
+  group_by(pid) %>%
+  summarise(total_mins_rehab = sum(cduration_rmeadown))
+
+n_ooh_contact_minutes <- interv_sel %>%
+  filter(out_of_hours==1) %>%
+  select(c(pid, cduration_rmeadown)) %>%
+  group_by(pid) %>%
+  summarise(total_sum_ooh_rehab = sum(cduration_rmeadown))
+
+### List of intervention types
+interv_types <- within(interv_sel, {cintervention <- as.character(cintervention);
+rehab_interventions <- ave(cintervention, pid, FUN=toString)})
+
+interv_types <- interv_types %>%
+  select(c(pid, rehab_interventions)) %>%
+  group_by(pid) %>%
+  slice(1)
+  
+lab_full <- left_join(lab_full, interv_types, by='pid')
+lab_full <- left_join(lab_full, first_type, by='pid')
+lab_full <- left_join(lab_full, second_type, by='pid')
+lab_full <- left_join(lab_full, n_contact_count, by='pid')
+lab_full <- left_join(lab_full, n_ooh_contact_count, by='pid')
+lab_full <- left_join(lab_full, n_contact_minutes, by='pid')
+lab_full <- left_join(lab_full, n_ooh_contact_minutes, by='pid')
+lab_full <- left_join(lab_full, first_interv, by='pid')
+lab_full <- left_join(lab_full, second_interv, by='pid')
+lab_full <- left_join(lab_full, first_interv_name, by='pid')
+lab_full <- left_join(lab_full, second_interv_name, by='pid')
+
+lab_full$time_to_therapy[is.na(lab_full$time_to_therapy)] <- -1
+lab_full$time_to_therapy_2[is.na(lab_full$time_to_therapy_2)] <- -1
+lab_full$time_to_therapy <- round(lab_full$time_to_therapy)
+lab_full$time_to_therapy_2 <- round(lab_full$time_to_therapy_2)
+lab_full$total_count_rehab[is.na(lab_full$total_count_rehab)] <- 0
+lab_full$total_count_ooh_rehab[is.na(lab_full$total_count_ooh_rehab)] <- 0
+lab_full$cintervention[is.na(lab_full$cintervention)] <- 'No intervention'
+lab_full$cintervention_2[is.na(lab_full$cintervention_2)] <- 'No intervention'
+lab_full$total_sum_ooh_rehab[is.na(lab_full$total_sum_ooh_rehab)] <- 0
+lab_full$total_mins_rehab[is.na(lab_full$total_mins_rehab)] <- 0
+```
+
+
+```{r}
+#### Build outcome flags
+lab_full$received_rehab <- ifelse(lab_full$time_to_therapy > -1, 1, 0)
+table(lab_full[lab_full$received_rehab==1,]$type)
+table(lab_full[lab_full$received_rehab==1,]$testPositive_10d)
+table(lab_full$received_rehab)
+
+lab_full <- lab_full %>%
+  rowwise() %>%
+  mutate(ttt_diff = time_to_therapy_2 - time_to_therapy) %>%
+  mutate(same_interv = ifelse((cintervention == cintervention_2) & (cintervention != 'No intervention'), 1, 0)) %>%
+  ungroup() %>%
+  # Get 7-day contact fields
+  mutate(second_contact_7d = ifelse((ttt_diff <= 7) & (cintervention != 'No intervention')
+                                      & (cintervention_2 != 'No intervention'), 1, 0)) %>%
+  mutate(first_contact_7d = ifelse((ttt_diff > 7) & (cintervention != 'No intervention')
+                                      & (cintervention_2 != 'No intervention'), 1, 0)) %>%
+  mutate(no_contacts_7d = ifelse((cintervention == 'No intervention')
+                                      & (cintervention_2 == 'No intervention'), 1, 0)) %>%
+  mutate(second_contact_7d = case_when(second_contact_7d==1~'2+', first_contact_7d==1~'1', 
+                                       no_contacts_7d==1~'0', TRUE~'0'))
+
+table(lab_full$second_contact_7d)
+prop.table(table(lab_full$second_contact_7d))
+prop.table(table(lab_full[lab_full$second_contact_7d=='2+',]$testPositive_10d))
+table(lab_full[lab_full$second_contact_7d=='2+',]$testPositive_10d)
+
+
+table(lab_full[(lab_full$second_contact_7d=='2+')&(lab_full$testPositive_10d==0),]$cintervention_2)
+table(lab_full[(lab_full$second_contact_7d=='2+')&(lab_full$testPositive_10d==1),]$cintervention_2)
+
+sum(lab_full[(lab_full$second_contact_7d=='2+')&(lab_full$testPositive_10d==1),]$total_count_rehab)
+```
+```{r}
+lab_full <- lab_full %>%
+  mutate(n_physio = str_count(lab_full$rehab_interventions, "Physiotherapy")) %>%
+  mutate(n_physio = ifelse(is.na(n_physio), 0, n_physio)) %>%
+  mutate(n_occ = str_count(lab_full$rehab_interventions, "Occupational Therapy")) %>%
+  mutate(n_occ = ifelse(is.na(n_occ), 0, n_occ)) %>%
+  mutate(n_diet = str_count(lab_full$rehab_interventions, "Dietetics")) %>%
+  mutate(n_diet = ifelse(is.na(n_diet), 0, n_diet)) %>%
+  mutate(n_spl = str_count(lab_full$rehab_interventions, "Speech and Language Therapy")) %>%
+  mutate(n_spl = ifelse(is.na(n_spl), 0, n_spl))
+
+sum(lab_full[(lab_full$second_contact_7d=='2+')&(lab_full$testPositive_10d==0),]$n_physio)
+sum(lab_full[(lab_full$second_contact_7d=='2+')&(lab_full$testPositive_10d==0),]$n_occ)
+sum(lab_full[(lab_full$second_contact_7d=='2+')&(lab_full$testPositive_10d==0),]$n_diet)
+sum(lab_full[(lab_full$second_contact_7d=='2+')&(lab_full$testPositive_10d==0),]$n_spl)
+
+sum(lab_full[(lab_full$second_contact_7d=='2+')&(lab_full$testPositive_10d==1),]$n_physio)
+sum(lab_full[(lab_full$second_contact_7d=='2+')&(lab_full$testPositive_10d==1),]$n_occ)
+sum(lab_full[(lab_full$second_contact_7d=='2+')&(lab_full$testPositive_10d==1),]$n_diet)
+sum(lab_full[(lab_full$second_contact_7d=='2+')&(lab_full$testPositive_10d==1),]$n_spl)
+```
+
+```{r}
+table(lab_full$testPositive_10d)
+```
+
+
+
+#### Deal with missing data
+```{r}
+lab_full$simd2020Vigintile[is.na(lab_full[,'simd2020Vigintile'])] <- as.numeric(round(mean(lab_full$simd2020Vigintile, na.rm=TRUE)))
+lab_full$simd2020Quintile[is.na(lab_full[,'simd2020Quintile'])] <- as.numeric(round(mean(lab_full$simd2020Quintile, na.rm=TRUE)))
+
+dim(lab_full)
+table(lab_full$simd2020Quintile)
+table(lab_full$simd2020Vigintile)
+sapply(lab_full, function(y) sum(length(which(is.na(y)))))
+```
+```{r}
+### LOS fix
+lab_full <- lab_full %>%
+  mutate(index_LOS = round(as.numeric(difftime(DischargeDateTime, AdmissionDateTime, units='days')), 2))
+```
+
+
+#### Export
+```{r}
+#### Export results
+write.csv(lab_full, "//<output_folder>/<cohort_file>.csv", row.names=FALSE)
+```

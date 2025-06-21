@@ -1,0 +1,261 @@
+---
+title: "COVID-19 post-discharge rehab risk"
+output: html_notebook
+---
+
+#### Libraries and working directory
+
+```{r}
+library(tidyverse)
+library(knitr)
+library(lubridate)
+library(survival)
+library(survminer)
+library(forcats)
+library(dplyr)
+library(finalfit)
+library(survey)
+library(jtools)
+library(cmprsk)
+library(broom)
+library(kableExtra)
+knitr::opts_chunk$set(echo=TRUE)
+knitr::opts_knit$set(root.dir = "//<study_data_folder>")
+sessionInfo()
+```
+
+#### Load the matched patient samples
+
+```{r}
+covid_pts <- read.csv("//<study_folder>/<cohort_file_with_contacts>.csv")
+head(covid_pts)
+dim(covid_pts)
+```
+
+```{r}
+mean(covid_pts$ageAtFirstTest)
+sd(covid_pts$ageAtFirstTest)
+table(covid_pts$sex)
+hist(covid_pts$ageAtFirstTest)
+table(covid_pts[covid_pts$received_rehab==1, ]$testPositive_10d)
+chisq.test(table(covid_pts$received_rehab, covid_pts$testPositive_10d))
+```
+
+```{r}
+covid_pts <- covid_pts %>%
+  mutate(age_group = case_when(
+    ageAtFirstTest >= 18 & ageAtFirstTest < 51 ~ "18-50",
+    ageAtFirstTest >= 51 & ageAtFirstTest < 66 ~ "51-65",
+    ageAtFirstTest >= 66 & ageAtFirstTest < 76 ~ "66-75",
+    ageAtFirstTest >= 76 & ageAtFirstTest < 83 ~ "76-82",
+    ageAtFirstTest >= 83 ~ "Above 82",
+  ),
+age_group = factor(age_group, level=c('18-50', '51-65', '66-75', '76-82', 'Above 82'))) %>%
+  mutate(simd2020Quintile = factor(simd2020Quintile, level=c('1','2','3','4','5')))
+
+table(covid_pts$simd2020Quintile)
+table(covid_pts$age_group)
+```
+#### Preprocessing
+
+```{r}
+covid_pts <- covid_pts %>%
+  mutate(date_of_first_therapy = ymd(AdmissionDate) + days(time_to_therapy)) %>%
+  mutate(died_during_period = ifelse((date_of_death >= ymd(AdmissionDate)) & (date_of_death <= ymd(AdmissionDate) + days(30)), 1, 0)) %>%
+  mutate(died_during_period = ifelse(is.na(died_during_period), 0, died_during_period)) %>%
+  mutate(status_rehab = case_when((received_rehab) & !(died_during_period) ~ 1, !(received_rehab) & !(died_during_period) ~ 2, (received_rehab) & (died_during_period) ~ 3, !(received_rehab) & (died_during_period) ~ 4)) %>%
+  mutate(status_acd = ifelse((date_of_death >= ymd(AdmissionDate)) & (date_of_death <= ymd(date_of_first_therapy)), 1, 0)) %>%
+  mutate(status_acd = ifelse(is.na(status_acd), 0, status_acd)) %>%
+  mutate(status_os = ifelse(status_rehab %in% c(1,2), 0, 1)) %>%
+  mutate(status_rhs = ifelse(status_rehab %in% c(1,2), 0, ifelse(status_rehab == 3, 1, 0))) %>%
+  mutate(status_crr = ifelse(status_rehab %in% c(1,2), 0, ifelse(status_rehab == 3, 1, 2))) %>%
+  mutate(ageAtFirstTest = ff_label(ageAtFirstTest, "Age (at first test)"),
+         age_group = ff_label(age_group, "Age group"),
+         sex = factor(sex) %>%
+           fct_recode("Male" = "M",
+                      "Female" = "F") %>% ff_label("Sex"),
+         Median_EpisodeLoSDays = ff_label(Median_EpisodeLoSDays, "Length-of-stay (median, days)"),
+         cm_chd = ff_label(cm_chd, 'Coronary Heart Disease (not specified)'),
+         cm_ischaemic_stroke = ff_label(cm_ischaemic_stroke, 'Ischaemic stroke'),
+         cm_stroke_nos = ff_label(cm_stroke_nos, 'Stroke (not specified)'),
+         cm_mi = ff_label(cm_mi, 'Myocardial Infarction'),
+         cm_diabetes = ff_label(cm_diabetes, 'Diabetes'),
+         cm_obesity = ff_label(cm_obesity, 'Obesity'),
+         cm_hip_fracture = ff_label(cm_hip_fracture, 'Fracture of hip'),
+         cm_dementia = ff_label(cm_dementia, 'Dementia'),
+         cm_delirium = ff_label(cm_delirium, 'Delirium (not caused by alcohol)'),
+         cm_depression = ff_label(cm_depression, 'Depression'),
+         cm_asthma = ff_label(cm_asthma, 'Asthma'),
+         cm_copd = ff_label(cm_copd, 'COPD'),
+         testPositive_10d=recode(testPositive_10d,'0'='Negative', '1'='Positive'))
+
+
+table(covid_pts$status_rehab)
+table(covid_pts$received_rehab)
+```
+```{r}
+#### Extract survivors-only for now
+covid_pts_surv <- covid_pts %>%
+  mutate(date_of_second_therapy = ymd(AdmissionDate) + days(time_to_therapy_2)) %>%
+  filter((date_of_death > date_of_second_therapy + days(30)) | (is.na(date_of_death)))
+
+table(covid_pts_surv[covid_pts_surv$second_contact_7d==1,]$type)
+table(covid_pts_surv[covid_pts_surv$second_contact_7d==1,]$testPositive_10d)
+table(covid_pts_surv$second_contact_7d)
+```
+
+
+#### Generate stratified weighted sample
+```{r}
+cov_design <- svydesign(ids=~1, data=covid_pts, weights=~ipw_weight, strata=~testPositive_10d, nest=TRUE)
+cov_design_pos <- svydesign(ids=~1, data=covid_pts[covid_pts$testPositive_10d=='Positive', ], strata=~testPositive_10d, weights=~ipw_weight)
+cov_design_neg <- svydesign(ids=~1, data=covid_pts[covid_pts$testPositive_10d=='Negative', ], weights=~ipw_weight)
+```
+```{r}
+head(cov_design$variables)
+dim(cov_design$variables)
+dim(covid_pts)
+```
+
+
+#### Multivariate regression analysis
+```{r}
+cov_list = c('age_group', 'sex', 'simd2020Quintile', 'cm_chd', 'cm_ischaemic_stroke', 'cm_stroke_nos', 'cm_mi', 'cm_diabetes', 'cm_obesity', 'cm_dementia', 'cm_delirium', 'cm_depression', 'cm_asthma', 'cm_copd', 'strata(testPositive_10d)')
+
+### Fit basic glm model
+reg_model <- svyglm(total_mins_rehab ~ age_group + sex + simd2020Quintile + cm_chd + cm_ischaemic_stroke + cm_stroke_nos + cm_mi + cm_diabetes + cm_obesity + cm_dementia + cm_delirium + cm_depression + cm_asthma + cm_copd + testPositive_10d, data=covid_pts, design=cov_design)
+
+reg_model_pos <- svyglm(total_mins_rehab ~ age_group + sex + simd2020Quintile + cm_chd + cm_ischaemic_stroke + cm_stroke_nos + cm_mi + cm_diabetes + cm_obesity + cm_dementia + cm_delirium + cm_depression + cm_asthma + cm_copd, data=covid_pts, design=cov_design_pos)
+
+reg_model_neg <- svyglm(total_mins_rehab ~ age_group + sex + simd2020Quintile + cm_chd + cm_ischaemic_stroke + cm_stroke_nos + cm_mi + cm_diabetes + cm_obesity + cm_dementia + cm_delirium + cm_depression + cm_asthma + cm_copd, data=covid_pts, design=cov_design_neg)
+
+summ(reg_model, digits=4)
+summ(reg_model_pos, digits=4)
+summ(reg_model_neg, digits=4)
+```
+```{r}
+export_summs(reg_model_pos, reg_model_neg, digits=4, model.names=c('COVID-19 Positive','COVID-19 Negative'), scale=TRUE, error_format="[{conf.low}, {conf.high}]", to_file='html', file.name='\\<study_folder>/<glm_model_summary>.html')
+```
+
+
+```{r}
+hist(resid(reg_model), main='Histogram of residuals for weighted rehab duration model.',
+     xlab='Standardised residuals', ylab='Frequency', breaks=500, xlim=c(-800, 800))
+
+plot(reg_model, which=1)
+```
+
+```{r}
+r1 <- plot_summs(reg_model_neg, reg_model_pos, plot.distributions=TRUE, inner_ci_level=.8, model.names=c('COVID-19 Negative','COVID-19 Positive'), coefs=c('Age'='ageAtFirstTest', 'Sex (% Male)'='sexMale', 'Coronary Heart Disease (unspecified)'='cm_chdY', 'Ischaemic Stroke'='cm_ischaemic_strokeY', 'Stroke (unspecified)'='cm_stroke_nosY', 'Myocardial Infarction'='cm_miY', 'Diabetes'='cm_diabetesY', 'Obesity'='cm_obesityY', 'Hip fracture'='cm_hip_fractureY', 'Dementia'='cm_dementiaY', 'Delirium (not alcohol-induced)'='cm_deliriumY', 'Depression'='cm_depressionY', 'Asthma'='cm_asthmaY', 'COPD'='cm_copdY'), scale=TRUE, robust=TRUE, font.legend=12)
+
+gg <- ggarrange(r1, nrow=1, ncol=1, common.legend=TRUE, legend='top') + theme(plot.margin=grid::unit(c(0,0,0,0), 'mm'))
+annotate_figure(gg, top=text_grob('IPTW-adjusted linear regression coefficients for outcome of total rehabilitation time', face='bold', size=12))
+
+ggsave('\\<study_folder>/<reg_force_plot>.html', height=5.2, units='in', bg='white')
+```
+
+```{r}
+r1 <- plot_summs(reg_model_neg, reg_model_pos, plot.distributions=TRUE, inner_ci_level=.8, model.names=c('COVID-19 Negative','COVID-19 Positive'), coefs=c('Age'='ageAtFirstTest', 'Sex (% Male)'='sexMale', 'Coronary Heart Disease (unspecified)'='cm_chd', 'Ischaemic Stroke'='cm_ischaemic_stroke', 'Stroke (unspecified)'='cm_stroke_nos', 'Myocardial Infarction'='cm_mi', 'Diabetes'='cm_diabetes', 'Obesity'='cm_obesity', 'Hip fracture'='cm_hip_fracture', 'Dementia'='cm_dementia', 'Delirium (not alcohol-induced)'='cm_delirium', 'Depression'='cm_depression', 'Asthma'='cm_asthma', 'COPD'='cm_copd'), scale=TRUE, robust=TRUE, font.legend=12)
+
+gg <- ggarrange(r2, nrow=1, ncol=1, common.legend=TRUE, legend='top')
+annotate_figure(gg, top=text_grob('IPTW-adjusted linear regression coefficient for length of stay relative to outcome of total rehabilitation time', face='bold', size=12))
+
+ggsave('\\<study_folder>/<reg_adjusted_force_plot>.pdf', bg='white')
+```
+
+#### Fit 2nd intervention model
+```{r}
+max(covid_pts_surv_int[covid_pts_surv_int$testPositive_10d == 'Positive',]$time_to_therapy_2)
+max(covid_pts_surv_int[covid_pts_surv_int$testPositive_10d == 'Negative',]$time_to_therapy_2)
+```
+
+```{r}
+### Define weighted Cox model
+explanatory <- c('age_group', 'sex', 'cm_chd', 'cm_ischaemic_stroke', 'cm_stroke_nos', 'cm_mi', 'cm_diabetes', 'cm_obesity', 'cm_hip_fracture', 'cm_dementia', 'cm_delirium', 'cm_depression', 'cm_asthma', 'cm_copd', 'index_LOS', 'strata(testPositive_10d)')
+
+covid_pts_surv_int <- covid_pts_surv %>%
+  mutate(testPositive_10d=recode(testPositive_10d,'0'='COVID-19 Negative', '1'='COVID-19 Positive'))
+
+unweighted_pl <- survfit(formula = Surv(time_to_therapy_2, second_contact_7d)~testPositive_10d, data=covid_pts_surv_int)
+unweighted <- Surv(covid_pts_surv_int$time_to_therapy_2, covid_pts_surv_int$second_contact_7d)
+unw_coxph <- coxph(unweighted~testPositive_10d, data=covid_pts_surv_int)
+summary(unw_coxph)
+
+surv <- list()
+surv[[1]] <- ggsurvplot(unweighted_pl, conf.int = TRUE, fun='cumhaz', legend.title="", legend.labs=c('COVID-19 Negative', 'COVID-19 Positive'), palette=c('lancet'), title='Unadjusted hazard model', xlab='Days from admission', font.title=c(11,'bold'), font.x=11,
+                   font.y=11, ylim=c(0, 8), size=0.5, font.legend=9)
+```
+```{r}
+weighted_pl <- surv_fit(Surv(time_to_therapy_2, second_contact_7d)~testPositive_10d, data=covid_pts_surv_int, weights=covid_pts_surv_int$ipw_weight)
+
+cov_design <- svydesign(ids=~1, data=covid_pts_surv_int, weights=~ipw_weight, strata=~testPositive_10d, nest=TRUE)
+w_coxph <- svycoxph(Surv(time_to_therapy_2, second_contact_7d)~testPositive_10d, data=covid_pts_surv_int, design=cov_design)
+summary(w_coxph)
+
+surv[[2]] <- ggsurvplot(weighted_pl, conf.int = TRUE, fun='cumhaz', legend.title="", legend.labs=c('COVID-19 Negative','COVID-19 Positive'), palette=c('lancet'), title='IPTW-adjusted hazard model', xlab='Days from admission', font.title=c(11,'bold'), font.x=11, font.legend=9, size=0.5,
+                   font.y=11)
+```
+
+```{r}
+gg <- arrange_ggsurvplots(surv, ncol=2, nrow=1, print=TRUE, title='Cumulative hazard ratios relative to outcome of second consecutive contact within 7 days', font.title=c(14, 'bold'))
+ggsave('\\<study_folder>/<reg_hazard_plot>.pdf', gg, bg='white')
+```
+
+
+#### Plot all-cause survival model
+```{r}
+unweighted_model <- survfit(Surv(time_to_therapy_2, second_contact_30d)~ageAtFirstTest + sex + cm_obesity + cm_ischaemic_stroke + cm_stroke_nos + cm_chd + cm_mi + cm_diabetes + cm_hip_fracture + cm_dementia + cm_delirium + cm_depression + cm_asthma + cm_copd + Median_EpisodeLoSDays + strata(testPositive_10d), data=covid_pts_surv, weights=ipw_weight)
+summary(cph_model)
+```
+
+
+##### CRR leftover code
+
+```{r}
+dep_surv <- 'Surv(time_to_death, status_acd)'
+
+covid_pts %>% 
+  finalfit(dep_surv, explanatory, add_dependent_label = FALSE) %>%
+  dplyr::rename("Overall survival"=label) %>%
+  dplyr::rename("Category"=levels) %>%
+  dplyr::rename("Sample size"=all) %>%
+  kbl() %>%
+  kable_classic(full_width=F, html_font='Cambria') %>%
+  remove_column(1) %>%
+  row_spec(0, bold=T) %>%
+  column_spec(1, bold=T)
+```
+```{r}
+### Plot residuals
+covid_pts %>% 
+  coxphmulti(dep_os, explanatory) %>%
+  cox.zph() %>%
+  {zph_result <<- .} %>%
+  plot()
+```
+
+```{r}
+zph_result
+```
+```{r}
+covid_pts %>%
+  summary_factorlist(dep_rhs, explanatory, column=TRUE,fit_id=TRUE) %>%
+  ff_merge(covid_pts %>%
+             coxphuni(dep_rhs, explanatory) %>%
+             fit2df(estimate_suffix = " (Risk CPH univariable)")) %>%
+  ff_merge(covid_pts %>%
+             coxphmulti(dep_rhs, explanatory) %>%
+             fit2df(estimate_suffix = " (Risk CPH multivariable)")) %>%
+  ff_merge(covid_pts %>%
+             crrmulti(dep_crr, explanatory) %>%
+             fit2df(estimate_suffix = " (Competing risks multivariable)")) %>%
+  select(-fit_id, -index) %>%
+  dependent_label(covid_pts, "Received therapy") %>%
+  dplyr::rename("Sample"=all) %>%
+  kbl() %>%
+  kable_classic(full_width=F, html_font='Cambria') %>%
+  remove_column(1) %>%
+  row_spec(0, bold=T) %>%
+  column_spec(1, bold=T) 
+```
+

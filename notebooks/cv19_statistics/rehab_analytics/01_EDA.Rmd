@@ -1,0 +1,247 @@
+---
+title: "01 Covid-19 Rehab Data Exploration"
+output: html_notebook
+---
+#### Libraries and working directory
+
+```{r}
+library(tidyverse)
+library(knitr)
+library(lubridate)
+library(grid)
+library(plyr)
+library(gtsummary)
+```
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE)
+knitr::opts_knit$set(root.dir = "//<study_data_folder>")
+```
+```{r}
+sessionInfo()
+```
+### Load patient cohort
+```{r}
+covid_pts <- read.csv("../<cohort_file>.csv")
+head(covid_pts)
+dim(covid_pts)
+```
+#### Check NAs
+```{r}
+cbind(lapply(lapply(covid_pts, is.na), sum))
+```
+
+#### Explore LOS
+
+```{r}
+require(gridExtra)
+pc <- ggplot(covid_pts, aes(x=Mean_EpisodeLoSDays, y=..density..)) +
+  geom_histogram(color='black', fill='white') +
+  xlim(min(covid_pts$Total_EpisodeLoSDays, na.rm=TRUE), 70) + ylim(0, 0.025) +
+  xlab('LOS (all COVID-19 positive episodes)') + ylab('fraction of patients')
+
+pc_d <- ggplot(covid_pts[covid_pts$died_during_stay==0,], aes(x=Mean_EpisodeLoSDays, y=..density..)) +
+  geom_histogram(color='black', fill='white') +
+  xlim(min(covid_pts$Total_EpisodeLoSDays, na.rm=TRUE), 70) + ylim(0, 0.025) +
+  xlab('LOS (patients surviving discharge)') + ylab('fraction of patients')
+
+grid.arrange(pc, pc_d, ncol=2, top=textGrob('Mean hospital length-of-stay (fractional days)', gp=gpar(fontsize=12, font=2)))
+```
+```{r}
+pc <- ggplot(covid_pts, aes(x=Mean_EpisodeLoSHours, y=..density..)) +
+  geom_histogram(color='black', fill='white') +
+  xlim(min(covid_pts$Mean_EpisodeLoSHours, na.rm=TRUE), 500) + ylim(0, 0.025) +
+  xlab('LOS (all COVID-19 positive episodes)') + ylab('fraction of patients')
+
+pc_d <- ggplot(covid_pts[covid_pts$died_during_stay==0,], aes(x=Mean_EpisodeLoSHours, y=..density..)) +
+  geom_histogram(color='black', fill='white') +
+  xlim(min(covid_pts$Mean_EpisodeLoSHours, na.rm=TRUE), 500) + ylim(0, 0.025) +
+  xlab('LOS (patients surviving discharge)') + ylab('fraction of patients')
+
+grid.arrange(pc, pc_d, ncol=2, top=textGrob('Mean hospital length-of-stay (fractional hours)', gp=gpar(fontsize=12, font=2)))
+```
+```{r}
+require(gridExtra)
+pc <- ggplot(covid_pts, aes(x=Total_EpisodeLoSDays, y=..density..)) +
+  geom_histogram(color='black', fill='white') +
+  xlab('LOS (all COVID-19 positive episodes)') + ylab('Fraction of patients') +
+  scale_x_continuous(expand=c(0,0), limits=c(0,80)) + scale_y_continuous(expand=c(0,0),
+                                                                         limits=c(0,0.09))
+
+pc_d <- ggplot(covid_pts[covid_pts$died_during_stay==0,], aes(x=Total_EpisodeLoSDays, y=..density..)) +
+  geom_histogram(color='black', fill='white') +
+  xlab('LOS (patients surviving discharge)') + ylab('') +
+  scale_x_continuous(expand=c(0,0), limits=c(0,80)) + scale_y_continuous(expand=c(0,0),
+                                                                         limits=c(0,0.09))
+
+gg <- grid.arrange(pc, pc_d, ncol=2, top=textGrob('Total hospital length-of-stay (fractional days)', gp=gpar(fontsize=12, font=2)))
+ggsave('//<output_folder>/<plot_file>.png', gg)
+```
+```{r}
+require(gridExtra)
+pc <- ggplot(covid_pts, aes(x=Total_EpisodeLoSDays, y=..density..)) +
+  geom_histogram(color='black', fill='white') +
+  xlab('LOS (all COVID-19 positive episodes)') + ylab('Fraction of patients') +
+  scale_x_continuous(expand=c(0,0), limits=c(0,80)) + scale_y_continuous(expand=c(0,0),
+                                                                         limits=c(0,0.09))
+
+pc_d <- ggplot(covid_pts[covid_pts$is_pheno_cardio==1,], aes(x=Total_EpisodeLoSDays, y=..density..)) +
+  geom_histogram(color='black', fill='white') +
+  xlab('LOS (cardiovascular phenotype group)') + ylab('Fraction of patients') +
+  scale_x_continuous(expand=c(0,0), limits=c(0,80)) + scale_y_continuous(expand=c(0,0),
+                                                                         limits=c(0,0.09))
+
+gg <- grid.arrange(pc, pc_d, ncol=2, top=textGrob('Total hospital length-of-stay (fractional days)', gp=gpar(fontsize=12, font=2)))
+ggsave('//<output_folder>/<plot_file>.png', gg)
+```
+
+```{r}
+covid_pts$pt_input <- as.factor(covid_pts$pt_input)
+covid_pts$ot_input <- as.factor(covid_pts$ot_input)
+levels(covid_pts$pt_input) <- c('Did not receive', 'Received')
+levels(covid_pts$ot_input) <- c('Did not receive', 'Received')
+mu_pt <- ddply(covid_pts[covid_pts$is_pheno_cardio==1,], 'pt_input', summarise, grp.mean=mean(Mean_EpisodeLoSDays, na.rm=TRUE))
+mu_ot <- ddply(covid_pts, 'ot_input', summarise, grp.mean=mean(Mean_EpisodeLoSDays, na.rm=TRUE))
+
+pc <- ggplot(covid_pts[covid_pts$is_pheno_cardio==1,], aes(x=Mean_EpisodeLoSDays, color=pt_input, fill=pt_input)) +
+  geom_histogram(aes(y=..density..), position='identity', alpha=0.5) +
+  #geom_density(alpha=0.5) +
+  geom_vline(data=mu_pt, aes(xintercept=grp.mean, color=pt_input), linetype='dashed') +
+  xlim(min(covid_pts$Total_EpisodeLoSDays, na.rm=TRUE), 40) + ylim(0, 0.3) +
+  xlab('Physiotherapist input') + ylab('Fraction of patients') +
+  scale_color_manual(values=c('#999999', '#9C4C46', '#F22416')) +
+  scale_fill_manual(values=c('#999999', '#9C4C46', '#F22416')) + theme_classic() +
+  theme(legend.title = element_blank(), legend.position = 'top')
+
+pc_ot <- ggplot(covid_pts[covid_pts$is_pheno_cardio==1,], aes(x=Mean_EpisodeLoSDays, color=ot_input, fill=ot_input)) +
+  geom_histogram(aes(y=..density..), position='identity', alpha=0.5) +
+  #geom_density(alpha=0.5) +
+  geom_vline(data=mu_ot, aes(xintercept=grp.mean, color=ot_input), linetype='dashed') +
+  xlim(min(covid_pts$Total_EpisodeLoSDays, na.rm=TRUE), 40) + ylim(0, 0.3) +
+  xlab('Occupational therapist input') + ylab('') +
+  scale_color_manual(values=c('#999999', '#9C4C46', '#F22416')) +
+  scale_fill_manual(values=c('#999999', '#9C4C46', '#F22416')) + theme_classic() +
+  theme(legend.title = element_blank(), legend.position = 'top')
+
+gg <- grid.arrange(pc, pc_ot, ncol=2, top=textGrob('Mean LOS of patients receiving input from care provider', gp=gpar(fontsize=12, font=2)))
+gg
+ggsave('//<output_folder>/<plot_file>.png', gg)
+```
+#### Length-of-stay stratified by age
+```{r}
+covid_pts <- covid_pts %>%
+  mutate(age_group = case_when(
+    ageAtFirstTest >= 18 & ageAtFirstTest < 30 ~ "18-29",
+    ageAtFirstTest >= 30 & ageAtFirstTest < 42 ~ "30-41",
+    ageAtFirstTest >= 42 & ageAtFirstTest < 54 ~ "42-53",
+    ageAtFirstTest >= 54 & ageAtFirstTest < 65 ~ "54-64",
+    ageAtFirstTest >= 65 ~ "Above 65"
+  ),
+age_group = factor(age_group, level=c('18-29', '30-41', '42-53', '54-64', 'Above 65')))
+
+table(covid_pts$age_group)
+```
+
+```{r}
+
+pag1 <- ggplot(covid_pts[covid_pts$is_pheno_cardio==1,], aes(x=age_group, y=Mean_EpisodeLoSDays, fill=pt_input)) + geom_boxplot() + 
+  xlab('Physiotherapist input (age group)') + ylab('Mean LoS') + theme_classic() +
+  theme(legend.title = element_blank(), legend.position = 'top') + scale_y_continuous(expand=c(0,0),
+                                                                         limits=c(-0.5,70))
+
+pag2 <- ggplot(covid_pts[covid_pts$is_pheno_cardio==1,], aes(x=age_group, y=Mean_EpisodeLoSDays, fill=ot_input)) + geom_boxplot() + 
+  xlab('Occupational therapist input (age group)') + ylab('') + theme_classic() +
+  theme(legend.title = element_blank(), legend.position = 'top') + scale_y_continuous(expand=c(0,0),
+                                                                         limits=c(-0.5,70))
+
+gg <- grid.arrange(pag1, pag2, ncol=2, top=textGrob('Mean LOS of patients receiving input from care provider (stratified by age group)', gp=gpar(fontsize=12, font=2)))
+ggsave('//<output_folder>/<plot_file>.png', gg)
+```
+
+#### LoS stratified by common comorbidities in the population
+```{r}
+covid_pts <- covid_pts %>%
+  mutate(common_cms = case_when(
+    is_copd == 1 ~ "COPD",
+    is_dementia == 1 ~ "Dementia",
+    is_diabetes == 1 ~ "Diabetes",
+    is_stable_angina == 1 ~ "Stable angina",
+    is_ischaemic_stroke == 1 ~ "Ischaemic stroke",
+    is_myocardial_infarction == 1 ~ "MI",
+    TRUE ~ "Other"
+  ),
+common_cms = factor(common_cms, level=c('COPD', 'Dementia', 'Diabetes', 'Stable angina', 'Ischaemic stroke', "MI", "Other")))
+
+table(covid_pts$common_cms)
+```
+```{r}
+covid_pts_cm <- covid_pts %>%
+  filter(common_cms != 'Other')
+
+table(covid_pts_cm$common_cms)
+```
+```{r}
+pcm1 <- ggplot(covid_pts_cm[covid_pts_cm$is_pheno_cardio==1,], aes(x=common_cms, y=Mean_EpisodeLoSDays, fill=pt_input)) + geom_boxplot() + 
+  xlab('Physiotherapist input (comorbidity)') + ylab('Mean LoS') + theme_classic() +
+  theme(legend.title = element_blank(), legend.position = 'top', axis.text.x = element_text(angle=90, vjust=0.6)) + scale_y_continuous(expand=c(0,0), limits=c(-0.5,70))
+
+pcm2 <- ggplot(covid_pts_cm[covid_pts_cm$is_pheno_cardio==1,], aes(x=common_cms, y=Mean_EpisodeLoSDays, fill=ot_input)) + geom_boxplot() + 
+  xlab('Occupational therapist input (comorbidity)') + ylab('') + theme_classic() +
+  theme(legend.title = element_blank(), legend.position = 'top', axis.text.x = element_text(angle=90, vjust=0.6)) + scale_y_continuous(expand=c(0,0),
+                                                                         limits=c(-0.5,70))
+
+gg <- grid.arrange(pcm1, pcm2, ncol=2, top=textGrob('Mean LOS of patients receiving input from care provider (stratified by comorbidity)', gp=gpar(fontsize=12, font=2)))
+ggsave('//<output_folder>/<plot_file>.png', gg)
+```
+
+#### Generate demographics table
+```{r}
+head(covid_pts)
+table(covid_pts$PhenotypeName)
+table(covid_pts$healthBoard)
+```
+```{r}
+covid_pts <- read.csv('//<study_folder>/<cohort_file>.csv')
+### Get CVS pts only
+covid_pts <- covid_pts[covid_pts$is_pheno_cardio==1,]
+covid_pts$received_therapist_input <- ifelse(covid_pts$pt_input==1 | covid_pts$ot_input==1, 'Received', 'Other/No input')
+covid_pts$received_therapist_input <- ifelse(covid_pts$pt_input==1, 'Physiotherapist', covid_pts$received_therapist_input)
+covid_pts$received_therapist_input <- ifelse(covid_pts$ot_input==1, 'Occupational Therapist', covid_pts$received_therapist_input)
+### Build all-cause mortality flag
+covid_pts$died = ifelse(is.na(covid_pts$date_of_death), 0, 1)
+### Re-build all comorbidities
+covid_pts <- covid_pts %>%
+  mutate(common_cms = case_when(
+    is_copd == 1 ~ "COPD",
+    is_dementia == 1 ~ "Dementia",
+    is_diabetes == 1 ~ "Diabetes",
+    is_stable_angina == 1 ~ "Stable angina",
+    is_ischaemic_stroke == 1 ~ "Ischaemic stroke",
+    is_myocardial_infarction == 1 ~ "MI",
+    is_asthma == 1 ~ 'Asthma',
+    TRUE ~ "Other"
+  ))
+#### Get sample set
+covid_pts_dem <- covid_pts %>%
+  select(c('received_therapist_input', 'sex', 'ageAtFirstTest', 'wasFirstTestPositive', 'died', 'died_during_stay', 'common_cms')) %>%
+  mutate(died = ifelse(died == 1, 'Y', 'N')) %>%
+  mutate(died_during_stay = ifelse(died_during_stay == 1, 'Y', 'N')) %>%
+  filter(sex %in% c('M', 'F'))
+```
+
+
+```{r}
+### Build summary table
+covid_pts_dem %>% 
+  mutate(received_therapist_input=factor(received_therapist_input, level=c('Physiotherapist', 'Occupational Therapist', 'Other/No input'))) %>%
+  tbl_summary(
+  by=received_therapist_input,
+  missing="no",
+  label=list(sex ~ 'Sex', ageAtFirstTest~'Age at first test', wasFirstTestPositive~'First Test Positive',died~'Died (all-cause)',died_during_stay~'Died (prior to discharge)', common_cms~'Comorbidity')
+) %>%
+  add_overall() %>%
+  add_p(pvalue_fun= ~style_pvalue(.x, digits=3)) %>%
+  bold_labels() %>%
+  modify_spanning_header(c('stat_1', 'stat_2', 'stat_3')~"**Contact with care provider**") %>%
+  as_gt() %>%
+  gt::gtsave(filename = "'//<output_folder>/<table_file>.html")
+```
