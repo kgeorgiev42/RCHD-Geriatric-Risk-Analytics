@@ -13,17 +13,14 @@ This repository contains the supporting codebase for the PhD thesis titled **"Ha
 
 ## Codebase Structure
 
-- **data/**
-  Currently contains the open [COCHRANE REH-COVER](https://rehabilitation.cochrane.org/special-projects/completed-special-projects/REH-COVER) summary data collated from previous systematic review rounds, used for the analysis in Chapter 4. Future data will include synthetic EHRs for Machine Learning and Process Mining pipelines.
+- **data/**: currently contains the open [COCHRANE REH-COVER](https://rehabilitation.cochrane.org/special-projects/completed-special-projects/REH-COVER) summary data collated from previous systematic review rounds, used for the analysis in Chapter 4. Future data will include synthetic EHRs for Machine Learning and Process Mining pipelines.
 
-- **docs/**
-  Basic documentation, including structured overviews of the analysis code and related work.
+- **docs/**: basic documentation, including structured overviews of the analysis code and related work.
 
-- **notebooks/**
-  Jupyter and R Markdown notebooks and files covering the original data processing pipelines used to conduct the experiments within [DataLoch](https://dataloch.org/) Secure Data Enviroments:
-  1) `cv19_statistics`: relevant to statistical analysis and mapping for COVID-19 care pathways and rehabilitation interventions (covered in Chapters 4, 5 and 6)
-  2) `process_mining`: relevant to Process Mining analytics for comparison of care interactions between COVID-19 pandemic waves (covered in Chapter 6).
-  3) `geriatric_ml`: relevant to Machine Learning analytics for risk and resource predictions in urgently hospitalised older patients (covered in Chapter 8).
+- **notebooks/**: Jupyter and R Markdown notebooks and files covering the original data processing pipelines used to conduct the experiments within [DataLoch](https://dataloch.org/) Secure Data Enviroments:
+  1) [cv19_statistics](https://github.com/kgeorgiev42/RCHD-Geriatric-Risk-Analytics/blob/main/docs/cv19_statistics.md): relevant to statistical analysis and mapping for COVID-19 care pathways and rehabilitation interventions (covered in Chapters 4, 5 and 6)
+  2) [process_mining](https://github.com/kgeorgiev42/RCHD-Geriatric-Risk-Analytics/blob/main/docs/process_mining.md): relevant to Process Mining analytics for comparison of care interactions between COVID-19 pandemic waves (covered in Chapter 6).
+  3) [geriatric_ml](https://github.com/kgeorgiev42/RCHD-Geriatric-Risk-Analytics/blob/main/docs/geriatric_ml.md): relevant to Machine Learning analytics for risk and resource predictions in urgently hospitalised older patients (covered in Chapter 8).
 
 ---
 
