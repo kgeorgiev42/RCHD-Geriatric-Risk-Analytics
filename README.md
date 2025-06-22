@@ -11,6 +11,8 @@ _PhD Thesis Supplementary Codebase_
 ## Description
 This repository contains the supporting codebase for the PhD thesis titled **"Harnessing Routine Data and Healthcare Contacts to Predict Risk and Treatment Requirements in Older People"**. The codebase provides scripts for the analysis of routine healthcare data, focusing on risk prediction, treatment requirements, and care pathway analytics relevant to geriatric care planning. The original work is based on data from NHS Lothian care systems, conducted within [DataLoch](https://dataloch.org/) Secure Data Environments (SDEs).
 
+_Note: only publicly-available or fake (dummy) data are shared in this repository._
+
 ## Codebase Structure
 
 - **data/**: currently contains the open [COCHRANE REH-COVER](https://rehabilitation.cochrane.org/special-projects/completed-special-projects/REH-COVER) summary data collated from previous systematic review rounds, used for the analysis in Chapter 4. Future data will include synthetic EHRs for Machine Learning and Process Mining pipelines.
