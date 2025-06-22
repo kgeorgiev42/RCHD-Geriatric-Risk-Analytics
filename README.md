@@ -2,9 +2,9 @@
 
 _PhD Thesis Supplementary Codebase_
 
-### _Konstantin Georgiev_
+### Maintained by: _Konstantin Georgiev_
 
-### _BHF Centre for Cardiovascular Science, University of Edinburgh_
+### Affiliation: _BHF Centre for Cardiovascular Science, University of Edinburgh_
 
 ---
 
