@@ -37,7 +37,7 @@ If you use this codebase or its methods, please cite any of the related publishe
 - Georgiev, K., Fleuriot, J.D., Papapanagiotou, P. et al. "Comparing Care Pathways Between COVID-19 Pandemic Waves Using Electronic Health Records: A Process Mining Case Study". *J Healthc Inform Res* 9, 41–66 (2025). https://doi.org/10.1007/s41666-024-00181-6
 - Georgiev, K., Fleuriot, J.D., Papapanagiotou, P. et al. "Comparing Care Pathways Between COVID-19 Pandemic Waves Using Electronic Health Records: A Process Mining Case Study." *J Healthc Inform Res* 9, 41–66 (2025). https://doi.org/10.1007/s41666-024-00181-6
 - Georgiev, K., McPeake, J., Shenkin, S.D. et al. "Understanding hospital activity and outcomes for people with multimorbidity using electronic health records". *Sci Rep* 15, 8522 (2025). https://doi.org/10.1038/s41598-025-92940-7
-- Georgiev, K., et al., "Predicting incident dementia in community-dwelling older adults using primary and secondary care data from electronic health records", **Brain Communications*, Volume 7, Issue 1, 2025, fcae469, https://doi.org/10.1093/braincomms/fcae469
+- Georgiev, K., et al., "Predicting incident dementia in community-dwelling older adults using primary and secondary care data from electronic health records", *Brain Communications*, Volume 7, Issue 1, 2025, fcae469, https://doi.org/10.1093/braincomms/fcae469
 
 ## Acknowledgments
 
